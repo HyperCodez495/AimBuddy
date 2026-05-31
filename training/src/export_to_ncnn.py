@@ -35,9 +35,13 @@ def run_export(config_path: Path | None = None, weights: Path | None = None) -> 
     assets_dir = cfg.paths.app_assets_models_dir
     assets_dir.mkdir(parents=True, exist_ok=True)
 
+    # Export at the runtime imgsz, NOT the training imgsz. We train at 640
+    # (to learn small/distant targets) but deploy at 256 for mobile latency.
+    export_imgsz = cfg.training.runtime_imgsz or cfg.training.imgsz
+    print(f"Exporting NCNN model at imgsz={export_imgsz} (training imgsz={cfg.training.imgsz})")
     exported = model.export(
         format="ncnn",
-        imgsz=cfg.training.imgsz,
+        imgsz=export_imgsz,
         half=cfg.export.half,
         simplify=cfg.export.simplify,
         dynamic=cfg.export.dynamic,

@@ -6,13 +6,16 @@ How to measure, evaluate, and improve AimBuddy runtime performance.
 
 ```mermaid
 flowchart LR
-    A["Capture (ImageReader)"] --> B["Ring Buffer (8 slots)"]
+    A["Capture (ImageReader, 1280x720 RGBA)"] --> B["Ring Buffer (4 slots, SPSC)"]
     B --> C["Drain to Latest"]
-    C --> D["Center Crop (dynamic)"]
-    D --> E["NCNN Vulkan Inference"]
-    E --> F["NMS + Coordinate Map"]
-    F --> G["Target Tracker"]
-    G --> H["Aim Controller"]
+    C --> D["Center Crop (adaptive 224-320)"]
+    D --> E["Resize to 256, NCNN Vulkan FP16"]
+    E --> F["Decode + NMS (IoU 0.45)"]
+    F --> G["Target Tracker (DeepSORT-style)"]
+    G --> H["Aim Controller (event-driven CV)"]
+    H --> I["Touch Injection (uinput or Shizuku)"]
+    G --> J["ESP Overlay (BoxSmoother)"]
+    J --> K["ImGui Render (60-90 FPS cap)"]
 ```
 
 ## Performance Targets
@@ -55,12 +58,28 @@ The inference loop dynamically adjusts the center crop size:
 
 This automatically adapts to different GPU speeds. Faster GPUs get larger crop areas for better detection coverage.
 
+Crop ceiling is `Config::CROP_SIZE = 320` (was 480). The smaller ceiling cuts resize work (320->256 = 1.25x vs 480->256 = 1.875x) and matches the FOV the runtime model actually resolves well at imgsz=256.
+
 ### Zero-Allocation Hot Paths
 
 - `DetectionResult` uses `FixedArray` (stack-allocated, max 50 detections).
 - `TargetArray` uses `FixedArray` (stack-allocated, max 50 tracks).
-- `FrameBuffer` is a lock-free SPSC ring buffer with no heap allocation (`Config::RING_BUFFER_CAPACITY = 8`).
+- `FrameBuffer` is a lock-free SPSC ring buffer with no heap allocation (`Config::RING_BUFFER_CAPACITY = 4`).
 - NCNN input mat is pre-allocated and reused.
+
+### Pipeline memory budget
+
+| Component | Approx. peak | Notes |
+|-----------|--------------|-------|
+| AHardwareBuffer ring (4 x 1280x720x4) | ~14 MB | Was ~28 MB at capacity 8. |
+| NCNN model + workspace (yolo26n FP16) | ~6-10 MB | Depends on Vulkan workspace pool. |
+| Render-side smoothing & detection state | < 1 MB | Stack/FixedArray, zero alloc per frame. |
+| ImGui font atlas | 1-6 MB | Up to ~20 MB if a full CJK font is bundled. |
+| **Total runtime** | **~25-35 MB** | Excluding OS/GPU driver overhead. |
+
+### Overlay render cap
+
+`nativeTick` in `renderer/imgui_menu.cpp` caps overlay redraw at 60 FPS when the menu is hidden, 90 FPS when the menu is open. On 120/144 Hz panels this prevents the GL surface from redrawing twice per inference frame for no perceptual gain.
 
 ### NCNN Vulkan Configuration
 
@@ -107,7 +126,7 @@ adb logcat -s AimBuddy_Native:I
 |---------|---------|---------------|
 | avg infer | Mean inference time per frame | < 10ms |
 | avg e2e | Mean capture-to-result latency | < 20ms |
-| crop | Current adaptive crop size | 224 to 480 |
+| crop | Current adaptive crop size | 224 to 320 |
 | drained | Frames skipped to catch up | < 2 per window |
 | dropped_push | Frames dropped because ring buffer was full | 0 |
 

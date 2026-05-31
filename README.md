@@ -11,12 +11,22 @@ AimBuddy is an AI-based Android aim assistant for real-time screen capture, obje
 
 ## Runtime Modes
 
-| Mode | Root Required | Features |
-|------|---------------|----------|
-| Visual Assist | No | Screen capture, YOLO inference, target tracking, ESP overlays |
-| Assisted Input | Yes | Everything above + low-latency touch injection via uinput |
+| Mode | Backend | Requires | Features |
+|------|---------|----------|----------|
+| Visual Assist | none | - | Screen capture, YOLO inference, target tracking, ESP overlays |
+| Assisted Input (root) | `uinput` virtual touchscreen | Root access | ESP + low-latency touch injection that runs **in parallel with the user's finger** (separate input stream, real touchscreen is never grabbed) |
+| Assisted Input (non-root) | Shizuku `injectInputEvent` | Shizuku service + permission | Same parallel-touch behavior with no root, using a virtual deviceId so the aim contact dispatches alongside physical touches |
 
-If root is unavailable, the app remains fully functional in Visual Assist Mode.
+If neither backend is available, the app stays in Visual Assist Mode and the menu still loads.
+
+### Feature Highlights
+
+- **Simultaneous user + aim touch** on both backends so you can move and aim at the same time.
+- **Streamer mode** - toggle in the ESP tab sets `FLAG_SECURE` so the overlay disappears from screen recordings, screenshots, and screen mirroring while staying visible on your own screen.
+- **Chinese (中文) UI** language in addition to English. Drop a CJK TTF at `app/src/main/assets/fonts/cjk.ttf` to render glyphs.
+- **Event-driven aim loop** - first touch lands within one inference cycle of target acquisition; no polling.
+- **Velocity lead prediction** scaled to the measured pipeline delay, so running targets are actually led instead of trailed.
+- **Adaptive crop** that shrinks under GPU pressure to keep `< 10ms` inference.
 
 ## How It Works
 
@@ -48,7 +58,7 @@ flowchart LR
 | Graphics | OpenGL ES 3.1 | OpenGL ES 3.2 + Vulkan |
 | RAM | 6 GB | 8 GB+ |
 | Storage | 2 GB free | 5 GB+ free |
-| Root | Not required for ESP | Required for aim assist |
+| Root *or* Shizuku | Not required for ESP | Either one enables aim assist |
 
 ### Training (Windows PC)
 
@@ -80,7 +90,10 @@ Prerequisites:
 
 1. Open AimBuddy on your device.
 2. Grant overlay permission when prompted.
-3. Approve or deny root access (aim assist requires root).
+3. Pick a backend for aim assist (optional):
+   - Approve root access for the `uinput` backend, or
+   - Install Shizuku, start the service, and grant the Shizuku permission for the non-root backend. See [docs/ShizukuSetup.md](docs/ShizukuSetup.md) for a step-by-step beginner guide.
+   - Skip both to run in visual-assist mode (ESP only).
 4. Grant MediaProjection screen capture permission.
 5. The overlay appears with ESP boxes and a floating settings icon.
 
@@ -88,10 +101,17 @@ Prerequisites:
 
 ```powershell
 cd training
-scripts\07_run_full_pipeline.bat
+scripts\00_automate.bat
 ```
 
-See the [Training Guide](docs/Training.md) for dataset setup and individual scripts.
+This single command runs: env setup -> frame extraction -> **teacher auto-labelling** -> negative mining (if you've dropped frames into `raw_frames/negatives/`) -> stable train/valid/test split -> dataset validation -> training at `imgsz=640` with strong augmentations -> NCNN export at `imgsz=256` -> deploy to `app/src/main/assets/models/` -> active-learning sweep that surfaces the next batch of frames worth labelling. State checkpoints at each step so re-running resumes from the last failure.
+
+The only manual touch points are:
+1. Drop gameplay video into `training/videos/`.
+2. (Optional) Drop no-enemy frames into `training/raw_frames/negatives/`.
+3. Spot-check `training/dataset/train/labels/` after the auto-label step and delete obviously-wrong boxes (Roboflow / labelImg take minutes vs the hours of from-scratch labelling).
+
+See the [Training Guide](docs/Training.md) for the per-step scripts and the bigger explanation of why this works.
 
 ## Build Details
 
@@ -136,23 +156,46 @@ Key outputs:
 Individual scripts:
 
 ```powershell
+scripts\00_automate.bat          REM End-to-end: videos -> NCNN -> deploy
 scripts\01_setup_environment.bat
 scripts\02_extract_frames.bat
 scripts\03_validate_dataset.bat
 scripts\04_train_adaptive.bat
 scripts\05_train_manual.bat
 scripts\06_export_ncnn.bat
+scripts\07_run_full_pipeline.bat
+scripts\08_auto_label.bat        REM Teacher (yolov8x) labels raw_frames
+scripts\09_mine_negatives.bat    REM Adds empty-label samples
+scripts\10_active_learning.bat   REM Surfaces next-iter review pool
 ```
+
+## Releases (CI)
+
+Releases are fully automated by `.github/workflows/release.yml`. The workflow runs whenever a push to `master` modifies `CHANGELOG.md`. It:
+
+1. Reads the top non-Unreleased `## [x.y.z] - YYYY-MM-DD` heading from `CHANGELOG.md`.
+2. Skips if `v<version>` already tagged or if `aimbuddy.versionName` in `gradle.properties` does not match.
+3. Builds the release APK on `ubuntu-latest` with JDK 17, Android SDK 35, NDK 29, CMake 3.22.1, and a Gradle cache.
+4. Signs the APK if these repository secrets are configured (otherwise produces an unsigned APK):
+   - `KEYSTORE_BASE64` (base64-encoded JKS upload keystore)
+   - `KEYSTORE_PASSWORD`
+   - `KEY_ALIAS`
+   - `KEY_PASSWORD`
+5. Creates a GitHub Release tagged `v<version>` with the changelog section as release notes and the APK attached.
+
+To cut a release: bump `aimbuddy.versionName` (and `aimbuddy.versionCode`) in `gradle.properties`, add a new `## [x.y.z] - YYYY-MM-DD` heading to `CHANGELOG.md`, push to `master`. The workflow handles everything else.
 
 ## Documentation
 
 | Document | Contents |
 |----------|----------|
-| [Architecture](docs/Architecture.md) | System design, threading, data flow, module reference |
+| [Architecture](docs/Architecture.md) | System design, threading, data flow, module reference, input-injection backends |
+| [Shizuku Setup](docs/ShizukuSetup.md) | Step-by-step setup for the non-root touch backend |
 | [Settings Guide](docs/SettingsGuide.md) | Every setting explained, presets, tuning workflow |
-| [Performance](docs/Performance.md) | Pipeline targets, adaptive crop, telemetry, optimization |
-| [Training](docs/Training.md) | Dataset format, training scripts, NCNN export |
+| [Performance](docs/Performance.md) | Pipeline targets, adaptive crop, memory budget, overlay render cap |
+| [Training](docs/Training.md) | Dataset workflow, auto-labelling, active learning, NCNN export |
 | [Troubleshooting](docs/Troubleshooting.md) | Build, runtime, and training issue resolution |
+| [Changelog](CHANGELOG.md) | Versioned history of behavior changes |
 | [Contributing](CONTRIBUTING.md) | Code standards, PR process, validation requirements |
 
 ## Repository Layout

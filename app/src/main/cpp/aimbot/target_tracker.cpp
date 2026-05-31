@@ -166,7 +166,11 @@ void TargetTracker::update(const ESP::BoundingBox* detections, int count, const 
                     const float resetJumpThreshold = std::max(80.0f, std::max(track.box.width, track.box.height) * 1.6f);
                     const bool resetFilterState = (centerJump > resetJumpThreshold) || (areaRatio > 2.3f);
 
-                    if (resetFilterState) {
+                    // ALSO reset filter state when the track was just lost: the
+                    // EMA/Kalman position is stale and would render as a "ghost
+                    // box" trailing the real target by several frames.
+                    const bool wasLost = (track.lost > 0);
+                    if (resetFilterState || wasLost) {
                         track.velocity = ESP::Vector2::Zero();
                         track.ema_x = newCenter.x;
                         track.ema_y = newCenter.y;
@@ -177,9 +181,12 @@ void TargetTracker::update(const ESP::BoundingBox* detections, int count, const 
                         track.kalman_p_y = 12.0f;
                         track.kalman_initialized = true;
                     }
-                    
-                    // Update velocity with EMA smoothing
-                    updateVelocity(track, match, dt, settings.velocitySmoothing);
+
+                    // Update velocity with EMA smoothing only on fresh matches
+                    // (re-acquired tracks need at least one stable frame first).
+                    if (!wasLost) {
+                        updateVelocity(track, match, dt, settings.velocitySmoothing);
+                    }
                     
                     track.box = match;
                     track.confidence = match.confidence;

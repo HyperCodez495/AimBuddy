@@ -187,7 +187,7 @@ void ESPRenderer::render(const DetectionResult& result) {
                 drawInfoOverlay(smoothedResult);
             }
         } else {
-            // No detections at all — flush the smoother immediately so ghost boxes
+            // No detections at all  -  flush the smoother immediately so ghost boxes
             // don't persist. Even with MAX_AGE=2 the box would still show for 2 frames;
             // flushing guarantees instant removal.
             boxSmoother_.clear();

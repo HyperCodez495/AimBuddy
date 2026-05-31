@@ -17,7 +17,7 @@
 
 // Fix for NDK compatibility issue usually caused by NCNN library mismatch
 // Defines the missing symbol __libcpp_verbose_abort.
-// We intentionally reopen the inline namespace here — suppress the Clang warning.
+// We intentionally reopen the inline namespace here  -  suppress the Clang warning.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winline-namespace-reopened-noninline"
 namespace std {
@@ -188,15 +188,17 @@ namespace {
                         cachedThreshold = threshold;
                     }
 
-                    // Recompute dynamic crop only when fov changes
+                    // Recompute dynamic crop only when fov changes.
+                    // Crop ceiling = Config::CROP_SIZE (320), floor = 224 so
+                    // adaptive pressure can shrink further when GPU is hot.
                     if (std::fabs(fovRadius - cachedFovRadius) > 0.0001f) {
                         const int safeScreenWidth = std::max(1, g_screenWidth);
                         int targetSize = static_cast<int>(fovRadius * 2.0f);
-                        targetSize = std::max(256, std::min(targetSize, safeScreenWidth));
+                        targetSize = std::max(kMinAdaptiveCrop, std::min(targetSize, safeScreenWidth));
 
                         const float scaleToCapture = static_cast<float>(Config::CAPTURE_WIDTH) / static_cast<float>(safeScreenWidth);
                         int dynamicCropSize = static_cast<int>(targetSize * scaleToCapture);
-                        dynamicCropSize = std::max(256, std::min(dynamicCropSize, Config::CROP_SIZE));
+                        dynamicCropSize = std::max(kMinAdaptiveCrop, std::min(dynamicCropSize, Config::CROP_SIZE));
 
                         cachedCropSize = dynamicCropSize;
                         adaptiveCropSize = cachedCropSize;
@@ -678,6 +680,32 @@ Java_com_aimbuddy_MainActivity_nativeSetTouchBackend(JNIEnv* /* env */, jobject 
 JNIEXPORT jint JNICALL
 Java_com_aimbuddy_MainActivity_nativeGetTouchBackend(JNIEnv* /* env */, jobject /* thiz */) {
     return g_settings.touchBackend;
+}
+
+/**
+ * Push streamer-mode (FLAG_SECURE) state to MainActivity via JNI.
+ * Called from imgui_menu.cpp whenever the user toggles the setting.
+ */
+void NotifyStreamerModeChanged(bool enabled) {
+    if (!g_jvm) return;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (g_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (g_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+            return;
+        }
+        attached = true;
+    }
+    jclass cls = env->FindClass("com/aimbuddy/MainActivity");
+    if (cls) {
+        jmethodID method = env->GetStaticMethodID(cls, "nativeApplyStreamerMode", "(Z)V");
+        if (method) {
+            env->CallStaticVoidMethod(cls, method, static_cast<jboolean>(enabled));
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+    }
+    if (attached) g_jvm->DetachCurrentThread();
 }
 
 JNIEXPORT void JNICALL

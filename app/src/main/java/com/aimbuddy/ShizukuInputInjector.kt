@@ -12,13 +12,29 @@ import rikka.shizuku.SystemServiceHelper
 
 /**
  * Non-root touch injector using hidden InputManager APIs from a Shizuku-authorized process.
+ *
+ * Design notes for simultaneous-touch correctness:
+ *  - The synthetic event uses a high pointer id (AIM_POINTER_ID = 19) so it
+ *    cannot collide with pointer ids the OS hands out to real fingers (which
+ *    typically start at 0 and grow as fingers are added).
+ *  - We pass deviceId = -1 ("virtual") so InputDispatcher treats this as a
+ *    distinct input stream from the user's physical touchscreen.
+ *  - source is SOURCE_TOUCHSCREEN (the game expects a touch, not a mouse).
+ *  - Pressure stays at 1.0 throughout so the game sees a sustained press;
+ *    we never send ACTION_CANCEL because that would tell the game the
+ *    gesture was invalidated by the system.
  */
 class ShizukuInputInjector {
 
     companion object {
         private const val TAG = "ShizukuInputInjector"
         private const val INJECT_MODE_ASYNC = 0
-        private const val AIM_POINTER_ID = 5
+        // Pointer id high enough to never collide with OS-allocated ids
+        // for real fingers (Android usually allocates 0..MAX_POINTERS-1).
+        private const val AIM_POINTER_ID = 19
+        // Virtual deviceId so InputDispatcher tracks this as a separate
+        // stream from the physical touchscreen.
+        private const val AIM_DEVICE_ID = -1
     }
 
     private val inputManagerProxy: Any? by lazy {
@@ -47,6 +63,7 @@ class ShizukuInputInjector {
     private var pointerDown = false
     private var lastX = 0f
     private var lastY = 0f
+    private var downTimeMs = 0L
 
     private fun buildPrivilegedInputManagerProxy(): Any? {
         return try {
@@ -104,44 +121,66 @@ class ShizukuInputInjector {
         }
     }
 
+    private fun buildEvent(action: Int, x: Float, y: Float, eventTime: Long): MotionEvent {
+        pointerCoords[0].x = x
+        pointerCoords[0].y = y
+        pointerCoords[0].pressure = 1f
+        pointerCoords[0].size = 1f
+
+        // 15-arg MotionEvent.obtain takes deviceId at position 11.
+        // (downTime, eventTime, action, pointerCount, properties, coords,
+        //  metaState, buttonState, xPrecision, yPrecision, deviceId,
+        //  edgeFlags, source, flags)
+        val event = MotionEvent.obtain(
+            downTimeMs,
+            eventTime,
+            action,
+            1,
+            pointerProperties,
+            pointerCoords,
+            0,
+            0,
+            1f,
+            1f,
+            AIM_DEVICE_ID,
+            0,
+            InputDevice.SOURCE_TOUCHSCREEN,
+            0
+        )
+        event.source = InputDevice.SOURCE_TOUCHSCREEN
+        return event
+    }
+
     @Synchronized
     fun injectAimMove(screenX: Float, screenY: Float, isFirst: Boolean): Boolean {
         return try {
             val now = SystemClock.uptimeMillis()
-            pointerCoords[0].x = screenX
-            pointerCoords[0].y = screenY
-            pointerCoords[0].pressure = 1f
-            pointerCoords[0].size = 1f
 
-            val action = if (isFirst || !pointerDown) MotionEvent.ACTION_DOWN else MotionEvent.ACTION_MOVE
-            val source = InputDevice.SOURCE_TOUCHSCREEN
-            val event = MotionEvent.obtain(
-                now,
-                now,
-                action,
-                1,
-                pointerProperties,
-                pointerCoords,
-                0,
-                0,
-                1f,
-                1f,
-                0,
-                0,
-                source,
-                0
-            )
-            event.source = source
+            // Force a fresh ACTION_DOWN whenever we are starting a new aim gesture.
+            val needDown = isFirst || !pointerDown
+            if (needDown) {
+                downTimeMs = now
+                val downEvent = buildEvent(MotionEvent.ACTION_DOWN, screenX, screenY, now)
+                val ok = invokeInject(downEvent)
+                downEvent.recycle()
+                if (!ok) {
+                    pointerDown = false
+                    return false
+                }
+                pointerDown = true
+                lastX = screenX
+                lastY = screenY
+                return true
+            }
 
-            val injected = invokeInject(event)
-            event.recycle()
+            val moveEvent = buildEvent(MotionEvent.ACTION_MOVE, screenX, screenY, now)
+            val ok = invokeInject(moveEvent)
+            moveEvent.recycle()
 
-            if (!injected) {
+            if (!ok) {
                 pointerDown = false
                 return false
             }
-
-            pointerDown = true
             lastX = screenX
             lastY = screenY
             true
@@ -160,38 +199,12 @@ class ShizukuInputInjector {
 
         return try {
             val now = SystemClock.uptimeMillis()
-            pointerCoords[0].x = lastX
-            pointerCoords[0].y = lastY
-            pointerCoords[0].pressure = 0f
-            pointerCoords[0].size = 0f
-
-            val event = MotionEvent.obtain(
-                now,
-                now,
-                MotionEvent.ACTION_UP,
-                1,
-                pointerProperties,
-                pointerCoords,
-                0,
-                0,
-                1f,
-                1f,
-                0,
-                0,
-                InputDevice.SOURCE_TOUCHSCREEN,
-                0
-            )
-
-            val injected = invokeInject(event)
-            event.recycle()
-
-            if (!injected) {
-                pointerDown = false
-                return false
-            }
+            val upEvent = buildEvent(MotionEvent.ACTION_UP, lastX, lastY, now)
+            val ok = invokeInject(upEvent)
+            upEvent.recycle()
 
             pointerDown = false
-            true
+            ok
         } catch (t: Throwable) {
             Log.e(TAG, "releaseAim failed: ${t.message}", t)
             pointerDown = false

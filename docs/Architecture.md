@@ -51,9 +51,10 @@ flowchart TB
         B4 --> B5["AimbotController.updateTargets()"]
     end
 
-    subgraph "Aim Loop Thread (AimbotController)"
-        C1[Read tracker state] --> C2[Compute aim movement]
-        C2 --> C3["TouchHelper inject"]
+    subgraph "Aim Loop Thread (AimbotController, event-driven)"
+        C1[wait on cv until new detection or 16ms tick] --> C2[Read tracker state]
+        C2 --> C3[Compute aim movement]
+        C3 --> C4["TouchHelper inject (non-blocking)"]
     end
 
     subgraph "Render Thread (GLSurfaceView)"
@@ -71,7 +72,7 @@ flowchart TB
 
 | Shared Resource | Protection | Threads |
 |----------------|------------|---------|
-| FrameBuffer | Lock-free SPSC ring buffer (8 slots) | Capture to Inference |
+| FrameBuffer | Lock-free SPSC ring buffer (4 slots) | Capture to Inference |
 | g_latestResult | std::mutex | Inference to Render |
 | TargetTracker state | std::mutex (m_trackerMutex) | Inference to Aim Loop |
 | g_settings (UnifiedSettings) | Relaxed copy-on-read | All threads |
@@ -80,7 +81,7 @@ flowchart TB
 
 The pipeline from screen capture to detection output:
 
-1. **Capture**: `ImageReader` callback fires per frame at device refresh rate. Frame pushed as `AHardwareBuffer` into `FrameBuffer` (lock-free SPSC ring buffer, capacity 8).
+1. **Capture**: `ImageReader` callback fires per frame at device refresh rate. Frame pushed as `AHardwareBuffer` into `FrameBuffer` (lock-free SPSC ring buffer, capacity 4).
 2. **Drain**: Inference thread pops the ring buffer and drains to the latest frame, releasing stale buffers. This ensures inference always processes the most recent capture.
 3. **Preprocess**: Center crop the capture buffer around screen center. Crop size is dynamic based on `fovRadius` and adaptive pressure.
 4. **Inference**: NCNN Vulkan runs YOLOv26n (256x256 input, FP16) on the cropped region. Target cycle time: 8ms.
@@ -117,16 +118,21 @@ flowchart TD
     B --> C{Overlay permission?}
     C -->|No| D[Request overlay permission]
     D --> C
-    C -->|Yes| E{Root available?}
-    E -->|No| F[Show root dialog]
-    F -->|Continue without| G[Request MediaProjection]
-    F -->|Retry| E
-    E -->|Yes| G
+    C -->|Yes| E{Preferred backend}
+    E -->|uinput| R{Root available?}
+    E -->|Shizuku| S{Shizuku binder + permission?}
+    R -->|No| RS[Fall back to Shizuku branch]
+    R -->|Yes| G
+    RS --> S
+    S -->|Need permission| SP[Shizuku.requestPermission]
+    SP --> S
+    S -->|Granted| AB[nativeInitAimbot via JNI bridge]
+    AB --> G[Request MediaProjection]
     G --> H[Start foreground service]
-    H --> I[Create ImageReader + VirtualDisplay]
+    H --> I[Create ImageReader and VirtualDisplay]
     I --> J[Start inference thread]
-    J --> K[Start aimbot controller]
-    K --> L[Show overlay]
+    J --> K[Aim controller waits on CV]
+    K --> L[Show overlay and floating icon]
 ```
 
 ## Native Layer
@@ -229,12 +235,28 @@ flowchart TD
 
 ### Input Injection
 
-TouchHelper creates a Linux uinput virtual touch device:
+Two backends, both designed so the aimbot pointer coexists with user fingers - never replacing or blocking them.
 
-1. Opens `/dev/uinput` (requires root for permissions).
-2. Creates a virtual multitouch device with screen resolution axes.
-3. Injects `ABS_MT_SLOT`, `ABS_MT_TRACKING_ID`, `ABS_MT_POSITION_X/Y` events.
-4. Touch is constrained to a configurable radius around a center point.
+**Root (uinput)**
+
+1. Probes the real touchscreen via `/dev/input/event*` to copy ABS axis ranges, bus id, and physical-location string.
+2. Opens `/dev/uinput` and creates a *separate* virtual multitouch device named `aimbuddy-virtual-touch`.
+3. Emits Type B multitouch events on slot 0 with a fixed tracking id (`0x7000`) that can never collide with ids the kernel allocates to physical fingers.
+4. The real touchscreen is **never grabbed** (`EVIOCGRAB` removed). The kernel reports both devices to InputDispatcher, so the aim pointer and the user's fingers are dispatched as two parallel streams.
+5. Touch is constrained to a configurable radius around a center point so the synthetic pointer behaves like a thumb on the aim stick.
+
+**Non-root (Shizuku)**
+
+1. Resolves `IInputManager.injectInputEvent` from a Shizuku-authorized process via reflection.
+2. Synthesizes `MotionEvent`s with `deviceId = -1` (virtual) and a high pointer id (`19`) - both deliberately distinct from physical-touchscreen ids so InputDispatcher routes the synthetic gesture as a parallel stream rather than merging it into the user's pointer history.
+3. Uses `INJECT_MODE_ASYNC` so injection never blocks the aim loop.
+4. The Kotlin injector keeps a running `downTime` for the aim gesture so the OS treats `ACTION_DOWN`/`ACTION_MOVE`/`ACTION_UP` as a single uninterrupted contact.
+
+This means moving the player and aiming can happen at the same time. The user's finger on the move pad and the aimbot's contact on the look pad are both live; either can be released without affecting the other.
+
+### Streamer Mode
+
+`UnifiedSettings.streamerMode` (toggled from the overlay menu) marks the ESP/menu windows with `WindowManager.LayoutParams.FLAG_SECURE`. While enabled, Android excludes the overlay from MediaProjection captures, screen recorders, screenshots, and mirroring - the game is captured as usual, but the overlay is stripped to a black surface in the recorded output.
 
 ## Settings System
 

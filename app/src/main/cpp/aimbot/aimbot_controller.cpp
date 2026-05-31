@@ -54,6 +54,7 @@ AimbotController::AimbotController(TouchHelper* touch, int screenWidth, int scre
     , m_recoilCompY(0.0f)
     , m_warmupFramesRemaining(0)
     , m_running(false)
+    , m_targetUpdateSeq(0)
 {
 }
 
@@ -71,6 +72,7 @@ void AimbotController::start() {
 
 void AimbotController::stop() {
     m_running = false;
+    m_targetUpdateCv.notify_all();
     if (m_aimThread.joinable()) {
         m_aimThread.join();
     }
@@ -82,31 +84,40 @@ void AimbotController::updateTargets(const ESP::BoundingBox* detections, int cou
 
     if (IsImGuiMenuVisible()) {
         stopAiming();
-        std::lock_guard<std::mutex> lock(m_trackerMutex);
-        m_tracker.reset();
+        {
+            std::lock_guard<std::mutex> lock(m_trackerMutex);
+            m_tracker.reset();
+        }
+        m_targetUpdateSeq.fetch_add(1, std::memory_order_release);
+        m_targetUpdateCv.notify_one();
         return;
     }
-    
+
     // Enemy-only fast release: never keep touch active on teammate/self/empty frames.
     const int enemyCount = CountEnemyDetections(detections, count);
     if (enemyCount == 0 && m_isAiming) {
         stopAiming();
     }
-    
-    std::lock_guard<std::mutex> lock(m_trackerMutex);
-    UnifiedSettings settingsSnapshot = g_settings;
-    settingsSnapshot.validate();
-    if (enemyCount == 0) {
-        m_tracker.reset();
-        return;
+
+    {
+        std::lock_guard<std::mutex> lock(m_trackerMutex);
+        if (enemyCount == 0) {
+            m_tracker.reset();
+        } else {
+            UnifiedSettings settingsSnapshot = g_settings;
+            // No validate() here  -  g_settings is already clamped by the UI / load path.
+            m_tracker.update(detections, count, settingsSnapshot);
+        }
     }
-    m_tracker.update(detections, count, settingsSnapshot);
+    // Wake the aim loop immediately so latency to first touch ~ inference time.
+    m_targetUpdateSeq.fetch_add(1, std::memory_order_release);
+    m_targetUpdateCv.notify_one();
 }
 
 void AimbotController::aimLoop() {
+    uint64_t lastSeenSeq = 0;
     while (m_running) {
         UnifiedSettings settingsSnapshot = g_settings;
-        settingsSnapshot.validate();
 
         if (IsImGuiMenuVisible()) {
             if (m_isAiming) stopAiming();
@@ -114,13 +125,15 @@ void AimbotController::aimLoop() {
                 std::lock_guard<std::mutex> lock(m_trackerMutex);
                 m_tracker.reset();
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(12));
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
             continue;
         }
 
         if (!settingsSnapshot.aimbotEnabled) {
             if (m_isAiming) stopAiming();
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // Wait until enabled or stopped  -  no busy polling.
+            std::unique_lock<std::mutex> lk(m_trackerMutex);
+            m_targetUpdateCv.wait_for(lk, std::chrono::milliseconds(120));
             continue;
         }
 
@@ -130,26 +143,31 @@ void AimbotController::aimLoop() {
             std::lock_guard<std::mutex> lock(m_trackerMutex);
             hasTarget = m_tracker.getBestTargetCopy(settingsSnapshot, m_screenWidth, m_screenHeight, bestTarget);
         }
-        
+
         if (hasTarget) {
             aimAt(bestTarget);
         } else {
             if (m_isAiming) stopAiming();
         }
-        
-        // Loop rate (separate from inference rate)
-        // e.g., 60 FPS aim loop
-        int sleepMs = 1000 / settingsSnapshot.aimbotFps;
-        if (sleepMs < 1) sleepMs = 1;
+
+        // Pace the loop: target aimbotFps as the maximum rate, but wake up
+        // earlier if updateTargets() signals a new detection so the first
+        // touch lands within one inference cycle of acquisition.
+        const uint32_t fps = std::max(30u, std::min(settingsSnapshot.aimbotFps, 120u));
+        const int sleepMs = std::max(1, static_cast<int>(1000u / fps));
         m_lastDtSeconds = static_cast<float>(sleepMs) / 1000.0f;
-        std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+        {
+            std::unique_lock<std::mutex> lk(m_trackerMutex);
+            m_targetUpdateCv.wait_for(lk, std::chrono::milliseconds(sleepMs),
+                [&]{ return !m_running.load() || m_targetUpdateSeq.load(std::memory_order_acquire) != lastSeenSeq; });
+            lastSeenSeq = m_targetUpdateSeq.load(std::memory_order_acquire);
+        }
     }
 }
 
 void AimbotController::aimAt(const TrackedTarget& target) {
     UnifiedSettings settings = g_settings;
-    settings.validate();
-    
+
     if (!m_touch) {
         stopAiming();
         return;
@@ -161,27 +179,37 @@ void AimbotController::aimAt(const TrackedTarget& target) {
         ? target.getAimPoint(settings.headPriority, settings.headOffset)
         : target.getFilteredAimPoint(filterType, settings.headPriority, settings.headOffset, settings.emaAlpha);
 
-    // Predictive lead using tracked velocity (bounded to avoid over-throw)
+    // Predictive lead using tracked velocity (bounded to avoid over-throw).
+    //
+    // sunone-style approach: predict where the target WILL be at the moment
+    // our touch reaches the screen  -  that's the inference latency plus one
+    // aim-loop period plus the aim FPS dead time. For mobile this is ~40ms.
+    // velocityLeadFactor scales how aggressively we trust the velocity vector.
     const float leadClamp = std::max(1.0f, settings.velocityLeadClamp);
     const float leadFactor = std::max(0.0f, settings.velocityLeadFactor);
 
     const float rawDx = aimPoint.x - m_crosshairX;
     const float rawDy = aimPoint.y - m_crosshairY;
     const float rawDistance = std::sqrt(rawDx * rawDx + rawDy * rawDy);
-    const float leadDistanceScale = AimbotMath::clamp((rawDistance - 8.0f) / std::max(64.0f, settings.fovRadius * 0.65f), 0.0f, 1.0f);
-    const float leadConfidenceScale = AimbotMath::clamp((target.confidence - 0.40f) / 0.60f, 0.0f, 1.0f);
+    const float leadDistanceScale = AimbotMath::clamp((rawDistance - 4.0f) / std::max(48.0f, settings.fovRadius * 0.5f), 0.0f, 1.0f);
+    const float leadConfidenceScale = AimbotMath::clamp((target.confidence - 0.35f) / 0.55f, 0.0f, 1.0f);
     float leadScale = leadDistanceScale * leadConfidenceScale;
 
-    // Motion gate: keep still-target stability, but allow stronger lead on runners.
+    // Motion gate: very small for still targets, full lead for anything that
+    // moves more than ~6 px/sec. This kills jitter on stationary enemies but
+    // keeps the lead useful the instant they start moving.
     const float targetSpeed = std::sqrt(target.velocity.x * target.velocity.x + target.velocity.y * target.velocity.y);
-    const float motionSpeed = std::max(0.0f, targetSpeed - 1.0f);
-    const float motionSpeedGate = AimbotMath::clamp(motionSpeed / 18.0f, 0.0f, 1.0f);
+    const float motionSpeed = std::max(0.0f, targetSpeed - 6.0f);
+    const float motionSpeedGate = AimbotMath::clamp(motionSpeed / 24.0f, 0.0f, 1.0f);
     leadScale *= motionSpeedGate;
 
-    // Lead uses a short look-ahead time (seconds), producing stable behavior across FPS/settings.
-    const float leadTime = AimbotMath::clamp(0.008f + leadDistanceScale * 0.018f + motionSpeedGate * 0.018f, 0.0f, 0.05f);
+    // Look-ahead time covers our pipeline delay (inference ~10-20ms +
+    // aim-loop period ~16ms + display delay). Cap at ~80ms so fast pans
+    // don't throw past the target.
+    const float pipelineDelay = m_lastDtSeconds + 0.020f;
+    const float leadTime = AimbotMath::clamp(pipelineDelay + leadDistanceScale * 0.025f, 0.0f, 0.080f);
     if (!m_isAiming) {
-        leadScale *= 0.40f;
+        leadScale *= 0.55f;
     }
     const float leadPxX = target.velocity.x * leadTime * leadFactor * leadScale;
     const float leadPxY = target.velocity.y * leadTime * leadFactor * leadScale;
@@ -292,20 +320,19 @@ void AimbotController::calcSmoothAim(float dx, float dy, float distance,
         factor *= dampFactor;
     }
     
-    // Proportional term + bounded frame-delta brake to reduce overshoot/oscillation
+    // Proportional term + bounded frame-delta brake to reduce overshoot/oscillation.
+    // The derivative term ONLY acts as a brake when error grows  -  it must never
+    // dominate the proportional pull, otherwise single-pixel detector noise
+    // produces visible shake on a locked target.
     float derivativeX = dx - m_prevErrX;
     float derivativeY = dy - m_prevErrY;
-    // Clamp derivative to a tighter range to avoid amplifying single-frame jitter.
-    // derivativeClamp was distance*0.25+4, which at close range is very small,
-    // letting even 1px detector noise produce a large correction signal.
-    const float derivativeClamp = AimbotMath::clamp(distance * 0.18f + 5.0f, 5.0f, 20.0f);
+    const float derivativeClamp = AimbotMath::clamp(distance * 0.15f + 4.0f, 4.0f, 16.0f);
     derivativeX = AimbotMath::clamp(derivativeX, -derivativeClamp, derivativeClamp);
     derivativeY = AimbotMath::clamp(derivativeY, -derivativeClamp, derivativeClamp);
-    float dGain = settings.pdDerivativeGain * 0.6f;  // Reduce derivative authority
-    if (distance < settings.convergenceRadius) {
-        const float nearT = AimbotMath::clamp(1.0f - (distance / std::max(settings.convergenceRadius, 1.0f)), 0.0f, 1.0f);
-        dGain *= AimbotMath::lerp(1.0f, 1.4f, nearT);  // Reduced from 1.8x to 1.4x
-    }
+    float dGain = settings.pdDerivativeGain * 0.5f;
+    // Heavily attenuate derivative near lock  -  that's where shake originates.
+    const float nearLockT = AimbotMath::clamp(distance / std::max(settings.convergenceRadius, 1.0f), 0.0f, 1.0f);
+    dGain *= AimbotMath::lerp(0.30f, 1.0f, nearLockT);
 
     outX = dx * factor - derivativeX * dGain;
     outY = dy * factor - derivativeY * dGain;
@@ -452,27 +479,35 @@ void AimbotController::sanitizeMovement(float dx, float dy, float distance,
 void AimbotController::applyMovement(float moveX, float moveY, const UnifiedSettings& settings) {
     m_touch->setBackend(settings.touchBackend == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT);
 
-    const float blend = m_isAiming ? 0.72f : 1.0f;
+    // Heavier smoothing when already locked  -  the proportional/derivative
+    // chain already produces a controlled output, so blending in some of the
+    // prior move just adds inertia and kills shake. When acquiring a new
+    // target we want the full computed move with no inertia.
+    const float blend = m_isAiming ? 0.55f : 1.0f;
     moveX = m_prevMoveX * (1.0f - blend) + moveX * blend;
     moveY = m_prevMoveY * (1.0f - blend) + moveY * blend;
 
-    if ((moveX * m_prevMoveX) < 0.0f && std::abs(moveX) < 2.6f) {
-        moveX *= 0.5f;
+    // Direction-reversal damping: if we just flipped sign with a small
+    // amplitude, that's almost always detector noise around the lock point.
+    if ((moveX * m_prevMoveX) < 0.0f && std::abs(moveX) < 3.5f) {
+        moveX *= 0.25f;
     }
-    if ((moveY * m_prevMoveY) < 0.0f && std::abs(moveY) < 2.6f) {
-        moveY *= 0.5f;
+    if ((moveY * m_prevMoveY) < 0.0f && std::abs(moveY) < 3.5f) {
+        moveY *= 0.25f;
     }
 
     m_prevMoveX = moveX;
     m_prevMoveY = moveY;
 
-    // Jitter suppression: dampen very small movements when already locked on target
+    // Aggressive jitter suppression when locked: below 2px movements are
+    // pixel-aliasing noise  -  quadratic ramp to zero.
     if (m_isAiming) {
         const float moveMag = std::sqrt(moveX * moveX + moveY * moveY);
-        if (moveMag < 1.5f && moveMag > EPSILON) {
-            const float jitterScale = moveMag / 1.5f; // 0..1 ramp
-            moveX *= jitterScale * jitterScale; // quadratic suppression
-            moveY *= jitterScale * jitterScale;
+        if (moveMag < 2.0f && moveMag > EPSILON) {
+            const float jitterScale = moveMag / 2.0f;
+            const float ramp = jitterScale * jitterScale * jitterScale; // cubic
+            moveX *= ramp;
+            moveY *= ramp;
         }
     }
 
@@ -486,7 +521,6 @@ void AimbotController::applyMovement(float moveX, float moveY, const UnifiedSett
         m_touch->touchDown(AIM_SLOT, m_touchX, m_touchY);
         m_isAiming = true;
         m_warmupFramesRemaining = 1;
-        usleep(1000);
     }
 
     if (m_warmupFramesRemaining > 0) {
@@ -494,7 +528,7 @@ void AimbotController::applyMovement(float moveX, float moveY, const UnifiedSett
         moveY *= 0.72f;
         m_warmupFramesRemaining--;
     }
-    
+
     m_touchX += moveX;
     m_touchY += moveY;
     
@@ -511,10 +545,6 @@ void AimbotController::applyMovement(float moveX, float moveY, const UnifiedSett
     }
     
     m_touch->touchMove(AIM_SLOT, m_touchX, m_touchY);
-    
-    if (settings.aimDelay > 0.0f) {
-        usleep(static_cast<useconds_t>(settings.aimDelay * 1000.0f));
-    }
 }
 
 void AimbotController::stopAiming() {

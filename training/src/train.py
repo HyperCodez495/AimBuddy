@@ -42,6 +42,7 @@ def run_training(config_path: Path | None = None, adaptive_override: bool | None
         "adaptive_enabled": cfg.adaptive.enabled if adaptive_override is None else adaptive_override,
         "train_images": count_training_images(cfg.paths.dataset_dir),
         "imgsz": params.imgsz,
+        "runtime_imgsz": params.runtime_imgsz,
         "epochs": params.epochs,
         "batch": params.batch,
         "patience": params.patience,
@@ -51,6 +52,13 @@ def run_training(config_path: Path | None = None, adaptive_override: bool | None
         "lr0": params.lr0,
         "lrf": params.lrf,
         "close_mosaic": params.close_mosaic,
+        "augmentation": {
+            "mosaic": cfg.augmentation.mosaic,
+            "mixup": cfg.augmentation.mixup,
+            "copy_paste": cfg.augmentation.copy_paste,
+            "hsv_v": cfg.augmentation.hsv_v,
+            "scale": cfg.augmentation.scale,
+        },
     }
     (reports_dir / "selected_training_config.json").write_text(json.dumps(selected, indent=2), encoding="utf-8")
 
@@ -69,6 +77,7 @@ def run_training(config_path: Path | None = None, adaptive_override: bool | None
         except Exception:
             device_value = "cpu"
 
+    aug = cfg.augmentation
     model.train(
         data=str(data_yaml),
         imgsz=params.imgsz,
@@ -90,6 +99,20 @@ def run_training(config_path: Path | None = None, adaptive_override: bool | None
         device=device_value,
         amp=True,
         verbose=True,
+        # Stronger augmentations help generalize across maps/outfits/poses.
+        hsv_h=aug.hsv_h,
+        hsv_s=aug.hsv_s,
+        hsv_v=aug.hsv_v,
+        degrees=aug.degrees,
+        translate=aug.translate,
+        scale=aug.scale,
+        shear=aug.shear,
+        perspective=aug.perspective,
+        flipud=aug.flipud,
+        fliplr=aug.fliplr,
+        mosaic=aug.mosaic,
+        mixup=aug.mixup,
+        copy_paste=aug.copy_paste,
     )
 
     best = output_runs_dir / params.run_name / "weights" / "best.pt"

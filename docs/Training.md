@@ -24,6 +24,8 @@ AimBuddy expects a single-class YOLOv26n model (class 0 = enemy). The NCNN runti
 
 ## Pipeline Overview
 
+The legacy `07_run_full_pipeline.bat` covers the classic train + export flow:
+
 ```mermaid
 flowchart LR
     A[Setup Environment] --> B[Preflight Checks]
@@ -33,14 +35,34 @@ flowchart LR
     E --> F[Deploy to App Assets]
 ```
 
+For the fully automated path (`00_automate.bat`), the pipeline is:
+
+```mermaid
+flowchart LR
+    V[videos/] --> X[Extract frames]
+    X --> T[Teacher auto-label]
+    N[raw_frames/negatives/] --> M[Mine negatives]
+    T --> U[Unsplit pool]
+    M --> U
+    U --> S[Hash split 80/15/5]
+    S --> D[Validate dataset]
+    D --> TR[Train at imgsz=640]
+    TR --> EX[Export NCNN at imgsz=256]
+    EX --> DEP[app/src/main/assets/models]
+    TR --> AL[Active learning sweep]
+    AL --> R[outputs/review/uncertain]
+```
+
+State is checkpointed after each step to `outputs/reports/automate_state.json`. Re-running picks up at the first failed or unfinished step.
+
 ### One-Command Run
 
 ```powershell
 cd training
-scripts\07_run_full_pipeline.bat
+scripts\00_automate.bat
 ```
 
-This runs all steps in sequence: environment setup, preflight checks, dataset validation, training, and NCNN export.
+This runs the full automated pipeline above. Use `scripts\07_run_full_pipeline.bat` instead if you already have a hand-curated dataset and just want the classic train + export.
 
 ### Full Pipeline Flags
 
@@ -73,6 +95,9 @@ Run from the `training/` directory:
 | `scripts\05_train_manual.bat` | Train with explicit config from `training/config/config.ini` |
 | `scripts\06_export_ncnn.bat` | Convert trained weights to NCNN format |
 | `scripts\07_run_full_pipeline.bat` | Run all steps end-to-end |
+| `scripts\08_auto_label.bat` | Use a large teacher model to label frames automatically |
+| `scripts\09_mine_negatives.bat` | Add empty-label samples (menus, vehicles, NPCs) to suppress false positives |
+| `scripts\10_active_learning.bat` | After first training, surface unlabeled frames most worth labelling next |
 
 ### Preflight Strictness Modes
 
@@ -128,6 +153,71 @@ Rules:
 - Class ID must be `0` (single class: enemy).
 - No data leakage between train, valid, and test splits.
 - Include background-only images (empty label files) to reduce false positives.
+
+## Skipping Manual Labelling
+
+Hand-drawing boxes on thousands of frames is the worst part of training. The new auto-label pipeline replaces ~95% of that work with a large teacher model.
+
+### Stage 1 - Bootstrap dataset with a teacher
+
+```powershell
+scripts\08_auto_label.bat
+```
+
+This script:
+
+1. Loads (and auto-downloads on first run) a large COCO-pretrained YOLO - `yolov8x.pt` by default, ~135 MB. The teacher detects the `person` class with very high recall.
+2. Walks every image in `raw_frames/` at `imgsz=1280` so small/distant humans are still found (the runtime model at `imgsz=256` would miss them).
+3. Filters detections by confidence (`--conf 0.30` default), runs NMS, drops boxes that are absurdly tiny or huge (UI noise vs HUD overlays).
+4. Remaps the COCO person id to our enemy id (0) and writes YOLO labels into `dataset/train/labels/`.
+
+You should still spot-check the output - the teacher occasionally boxes posters, billboards, vehicles, or friendly NPCs. Open `dataset/train/` in Roboflow / labelImg / CVAT and delete obvious mislabels. That review takes minutes instead of hours.
+
+Tune for harder targets:
+
+```powershell
+scripts\08_auto_label.bat --teacher yolo11x.pt --imgsz 1536 --conf 0.20
+```
+
+After your first training pass, swap the teacher to your trained `best.pt` and run again at `imgsz=640`. The student now distills its own labels on fresh frames - this is how to grow the dataset without ever opening a labelling tool again.
+
+### Stage 2 - Add labelled negatives
+
+A detector trained only on positives over-confidently boxes every human-shaped thing - kill-feed avatars, billboard models, friendly NPCs, vehicles. Mix in 10-25% negatives:
+
+1. Drop no-enemy frames into `raw_frames/negatives/` (menus, scoreboards, vehicles, allies, etc.).
+2. Run `scripts\09_mine_negatives.bat`.
+
+This copies them into `dataset/train/` with empty label files. The model learns what is NOT a target and stops firing on HUD elements.
+
+### Stage 3 - Active learning
+
+After the first training pass, surface frames the model is unsure about:
+
+```powershell
+scripts\10_active_learning.bat
+```
+
+This script runs your trained student over a fresh `raw_frames/` pool, scores each frame by:
+
+- Number of student detections in the uncertain confidence band (0.25-0.55).
+- Disagreement with a larger teacher (student misses N boxes the teacher catches).
+- Zero-detection frames where the teacher fires (strongest signal - your model has a blind spot here).
+
+The top-scoring frames are copied to `outputs/review/uncertain/`. Hand-label just those, add them back to `dataset/train/`, retrain. Each iteration squeezes more accuracy out of the smallest possible manual effort.
+
+### Recommended Dataset Composition
+
+| Source | Share | Purpose |
+|--------|-------|---------|
+| Auto-labelled gameplay frames | 60-75% | Variety: maps, outfits, poses, distances |
+| Hand-corrected active-learning surfaces | 10-20% | Model's known blind spots |
+| Hand-labelled negatives (menus, vehicles, NPCs) | 10-25% | Suppresses false positives |
+| Hand-labelled hard cases (distant, occluded, prone) | 5-15% | Pushes the long tail |
+
+### High-resolution training, low-resolution inference
+
+The training config now trains at `imgsz=640` (config `[training] imgsz`) and exports the NCNN model at `runtime_imgsz=256` (config `[training] runtime_imgsz`). Training at the higher resolution lets the network learn small / distant targets that disappear at 256x256; the exported model still runs at 256 on device so latency on the phone is unchanged.
 
 ### data.yaml Example
 

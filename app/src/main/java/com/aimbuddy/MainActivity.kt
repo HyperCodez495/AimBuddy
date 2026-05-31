@@ -1,11 +1,8 @@
 package com.aimbuddy
 
-import android.Manifest
 import android.app.Activity
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
@@ -24,7 +21,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.provider.OpenableColumns
-import android.text.TextUtils
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Gravity
@@ -32,7 +28,6 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.View
 import android.view.WindowManager
-import android.view.accessibility.AccessibilityManager
 import android.widget.ImageView
 import android.widget.Toast
 import android.graphics.drawable.Drawable
@@ -45,40 +40,84 @@ import com.caverock.androidsvg.SVG
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
+import androidx.compose.ui.unit.sp
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import rikka.shizuku.Shizuku
+
+// Minimal dark palette tuned for the launcher and the small set of
+// state colors used on the status pill / backend chips. Kept here as
+// top-level so the composables don't recompute them every recomposition.
+private val StatusGreen = Color(0xFF34D399)
+private val StatusAmber = Color(0xFFFBBF24)
+private val StatusRed   = Color(0xFFF87171)
+private val StatusGrey  = Color(0xFF6B7280)
+
+private val AimBuddyColors = darkColorScheme(
+    primary          = Color(0xFF8AB4F8),
+    onPrimary        = Color(0xFF0B1220),
+    secondary        = Color(0xFF93C5FD),
+    background       = Color(0xFF0B0F17),
+    surface          = Color(0xFF111722),
+    surfaceVariant   = Color(0xFF1B2230),
+    onBackground     = Color(0xFFE5E7EB),
+    onSurface        = Color(0xFFE5E7EB),
+    onSurfaceVariant = Color(0xFF9CA3AF),
+)
 
 /**
  * MainActivity - ESP overlay control interface
@@ -122,6 +161,16 @@ class MainActivity : AppCompatActivity() {
         fun nativeInjectShizukuAimUp(): Boolean {
             val activity = activityRef?.get() ?: return false
             return activity.injectShizukuAimUp()
+        }
+
+        /**
+         * Toggle FLAG_SECURE on overlay windows. Called from native code via JNI
+         * when the user enables/disables Streamer Mode in the in-game menu.
+         */
+        @JvmStatic
+        fun nativeApplyStreamerMode(enabled: Boolean) {
+            val activity = activityRef?.get() ?: return
+            activity.runOnUiThread { activity.applyStreamerModeFlag(enabled) }
         }
 
         init {
@@ -192,6 +241,10 @@ class MainActivity : AppCompatActivity() {
         repo = STORE_REPO,
         branch = STORE_BRANCH
     )
+
+    // Streamer mode (FLAG_SECURE on overlay windows)
+    @Volatile
+    private var streamerModeEnabled: Boolean = false
 
     // Floating menu icon overlay
     private var floatingIconView: ImageView? = null
@@ -301,14 +354,20 @@ class MainActivity : AppCompatActivity() {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            MaterialTheme(colorScheme = AimBuddyColors) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    ControlScreen(
+                    LauncherScreen(
                         isRunning = isRunningState,
                         statusText = statusTextState,
                         activeModelText = activeModelTextState,
+                        rootReady = rootAvailable.get(),
+                        shizukuReady = shizukuAvailable.get(),
                         onStart = { onStartClicked() },
-                        onStop = { onStopClicked() }
+                        onStop = { onStopClicked() },
+                        onImportModel = { onImportModelClicked() },
+                        onOpenStore = { onStoreClicked() },
+                        onOpenGithub = { openGithubUrl() },
+                        onOpenCreator = { openCreatorUrl() },
                     )
                 }
             }
@@ -1081,6 +1140,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Apply or clear FLAG_SECURE on overlay windows.
+     * When the flag is set, MediaProjection / screen recorders / screenshots
+     * will not capture the overlay  -  only the game underneath.
+     */
+    fun applyStreamerModeFlag(enabled: Boolean) {
+        streamerModeEnabled = enabled
+        val wm = windowManager ?: return
+
+        imguiOverlay?.let { view ->
+            // GLSurfaceView is a SurfaceView; SurfaceView owns a separate
+            // surface composited by SurfaceFlinger that does NOT inherit
+            // FLAG_SECURE from the parent window on all Android versions.
+            // Call setSecure() explicitly so MediaProjection blanks the GL
+            // surface regardless of the host window flag.
+            try { view.setSecure(enabled) } catch (_: Throwable) {}
+
+            val params = view.layoutParams as? WindowManager.LayoutParams ?: return@let
+            if (enabled) {
+                params.flags = params.flags or WindowManager.LayoutParams.FLAG_SECURE
+            } else {
+                params.flags = params.flags and WindowManager.LayoutParams.FLAG_SECURE.inv()
+            }
+            try { wm.updateViewLayout(view, params) } catch (_: IllegalArgumentException) {}
+        }
+
+        floatingIconView?.let { view ->
+            val params = floatingIconParams ?: return@let
+            if (enabled) {
+                params.flags = params.flags or WindowManager.LayoutParams.FLAG_SECURE
+            } else {
+                params.flags = params.flags and WindowManager.LayoutParams.FLAG_SECURE.inv()
+            }
+            try { wm.updateViewLayout(view, params) } catch (_: IllegalArgumentException) {}
+        }
+    }
+
     private fun injectShizukuAimMove(screenX: Float, screenY: Float, isFirst: Boolean): Boolean {
         if (!shizukuAvailable.get()) {
             return false
@@ -1127,6 +1223,11 @@ class MainActivity : AppCompatActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
+        }
+
+        if (streamerModeEnabled) {
+            layoutParams.flags = layoutParams.flags or WindowManager.LayoutParams.FLAG_SECURE
+            try { imguiOverlay?.setSecure(true) } catch (_: Throwable) {}
         }
 
         windowManager?.addView(imguiOverlay, layoutParams)
@@ -1218,6 +1319,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 else -> false
             }
+        }
+
+        if (streamerModeEnabled) {
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_SECURE
         }
 
         wm.addView(iconView, params)
@@ -1347,118 +1452,205 @@ class MainActivity : AppCompatActivity() {
         startActivity(intent)
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
-    private fun ControlScreen(
+    private fun LauncherScreen(
         isRunning: Boolean,
         statusText: String,
         activeModelText: String,
+        rootReady: Boolean,
+        shizukuReady: Boolean,
         onStart: () -> Unit,
-        onStop: () -> Unit
+        onStop: () -> Unit,
+        onImportModel: () -> Unit,
+        onOpenStore: () -> Unit,
+        onOpenGithub: () -> Unit,
+        onOpenCreator: () -> Unit,
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(20.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { onImportModelClicked() }) {
-                    Icon(
-                        imageVector = Icons.Filled.FolderOpen,
-                        contentDescription = "Import model files"
-                    )
-                }
-                IconButton(onClick = { onStoreClicked() }) {
-                    Icon(
-                        imageVector = Icons.Filled.Download,
-                        contentDescription = "Model store (coming soon)"
-                    )
-                }
-            }
+        var menuOpen by remember { mutableStateOf(false) }
+        val statusColor = statusAccentFor(statusText, isRunning)
 
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = {
+                CenterAlignedTopAppBar(
+                    title = {
+                        Text(
+                            text = "AimBuddy",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    },
+                    actions = {
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Import model files") },
+                                leadingIcon = { Icon(Icons.Filled.FolderOpen, null) },
+                                onClick = { menuOpen = false; onImportModel() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Model store") },
+                                leadingIcon = { Icon(Icons.Filled.Download, null) },
+                                onClick = { menuOpen = false; onOpenStore() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("View on GitHub") },
+                                leadingIcon = { Icon(Icons.Filled.Info, null) },
+                                onClick = { menuOpen = false; onOpenGithub() },
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ),
+                )
+            },
+        ) { inner ->
             Column(
                 modifier = Modifier
-                    .align(Alignment.Center)
-                    .fillMaxWidth(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .fillMaxSize()
+                    .padding(inner)
+                    .padding(horizontal = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
-                Text(
-                    text = "AimBuddy",
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = MaterialTheme.colorScheme.onBackground
+                Spacer(Modifier.height(8.dp))
+
+                StatusCard(
+                    statusText = statusText.removePrefix("Status: "),
+                    accent = statusColor,
+                    isRunning = isRunning,
                 )
-                Text(
-                    text = "Real-time object detection and tracking",
-                    modifier = Modifier.padding(top = 8.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = statusText,
-                    modifier = Modifier.padding(top = 12.dp, bottom = 24.dp),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center
-                )
+
+                BackendChips(rootReady = rootReady, shizukuReady = shizukuReady)
+
                 Text(
                     text = activeModelText,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.tertiary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(bottom = 14.dp)
                 )
 
-                Row(
-                    modifier = Modifier.padding(vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                Spacer(Modifier.height(4.dp))
+
+                FilledTonalButton(
+                    onClick = if (isRunning) onStop else onStart,
+                    modifier = Modifier
+                        .widthIn(min = 220.dp)
+                        .heightIn(min = 56.dp),
+                    shape = RoundedCornerShape(28.dp),
                 ) {
-                    Button(
-                        onClick = onStart,
-                        enabled = !isRunning,
-                        modifier = Modifier.width(170.dp)
-                    ) {
-                        Text(if (isRunning) "Running" else "Start")
-                    }
-
-                    Button(
-                        onClick = onStop,
-                        enabled = isRunning,
-                        modifier = Modifier.width(170.dp)
-                    ) {
-                        Text("Stop")
-                    }
+                    Icon(
+                        imageVector = if (isRunning) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = if (isRunning) "Stop" else "Start",
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 17.sp,
+                    )
                 }
-            }
 
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+                Spacer(Modifier.weight(1f))
+
                 Text(
-                    text = "GitHub: $OSS_GITHUB_URL",
-                    modifier = Modifier.clickable { openGithubUrl() },
+                    text = "Open source - created by $CREATOR_NAME",
+                    modifier = Modifier
+                        .clickable { onOpenCreator() }
+                        .padding(bottom = 16.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center
-                )
-                Spacer(modifier = Modifier.width(16.dp))
-                Text(
-                    text = "Created by $CREATOR_NAME",
-                    modifier = Modifier.clickable { openCreatorUrl() },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
+                    textAlign = TextAlign.Center,
                 )
             }
+        }
+    }
+
+    @Composable
+    private fun StatusCard(statusText: String, accent: Color, isRunning: Boolean) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 22.dp, vertical = 18.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(accent),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                Text(
+                    text = if (isRunning) "Capture pipeline live" else "Tap Start to begin capture and overlay",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun BackendChips(rootReady: Boolean, shizukuReady: Boolean) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            BackendChip(label = "Root", ready = rootReady)
+            Spacer(Modifier.width(10.dp))
+            BackendChip(label = "Shizuku", ready = shizukuReady)
+        }
+    }
+
+    @Composable
+    private fun BackendChip(label: String, ready: Boolean) {
+        val color = if (ready) StatusGreen else MaterialTheme.colorScheme.onSurfaceVariant
+        AssistChip(
+            onClick = {},
+            label = { Text(label, fontWeight = FontWeight.Medium) },
+            leadingIcon = {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(color),
+                )
+            },
+            colors = AssistChipDefaults.assistChipColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+            ),
+        )
+    }
+
+    @Composable
+    private fun statusAccentFor(statusText: String, isRunning: Boolean): Color {
+        val lower = statusText.lowercase()
+        return when {
+            isRunning || lower.contains("running") -> StatusGreen
+            lower.contains("fail") -> StatusRed
+            lower.contains("wait") || lower.contains("loading") || lower.contains("starting") || lower.contains("stopping") -> StatusAmber
+            else -> StatusGrey
         }
     }
     
@@ -1477,9 +1669,9 @@ class MainActivity : AppCompatActivity() {
                 ImGuiGLSurface.nativeSetRootAvailable(hasRoot)
 
                 if (hasRoot) {
-                    Log.i(TAG, "Root available — initializing aimbot")
+                    Log.i(TAG, "Root available  -  initializing aimbot")
                     // Guard: only call nativeInitAimbot if native init already succeeded.
-                    // nativeIsRunning() == false here just means inference not started yet —
+                    // nativeIsRunning() == false here just means inference not started yet  - 
                     // nativeInit success is tracked by statusTextState not being "Init Failed".
                     if (statusTextState != "Status: Init Failed") {
                         if (nativeInitAimbot()) {

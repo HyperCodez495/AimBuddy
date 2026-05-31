@@ -30,9 +30,9 @@ Settings are read by snapshot copy in hot-path threads to avoid contention.
 | touchRadius | 50 to 500 | 250 |
 | aimDelay | 0 to 50 | 3.5 |
 | emaAlpha | 0.08 to 0.90 | 0.25 |
-| velocityLeadFactor | 0.0 to 0.8 | 0.28 |
-| velocityLeadClamp | 1 to 40 | 18 |
-| pdDerivativeGain | 0.0 to 0.35 | 0.045 |
+| velocityLeadFactor | 0.0 to 1.5 | 0.85 |
+| velocityLeadClamp | 1 to 120 | 60 |
+| pdDerivativeGain | 0.0 to 0.35 | 0.035 |
 | maxLostFrames | 1 to 30+ | 8 |
 | maxLockMissFrames | 1 to 30 | 2 |
 | targetSwitchDelayFrames | 0 to 30 | 6 |
@@ -52,6 +52,7 @@ Boolean defaults that are often tuned together:
 - `enableConvergenceDamping`: true
 - `recoilCompensationEnabled`: false
 - `showTouchZone`: true
+- `streamerMode`: false (when true, overlay windows are marked `FLAG_SECURE` and stripped from screen recordings, screenshots, and screen mirroring)
 
 Deprecated setting note:
 
@@ -69,8 +70,8 @@ General-purpose balanced profile.
 |---------|-------|
 | Aim mode | Smooth |
 | Speed / Smoothness | 0.48 / 0.78 |
-| Filter | EMA (alpha 0.25) |
-| Velocity lead | 0.22 (clamp 18) |
+| Filter | EMA (alpha 0.30) |
+| Velocity lead | 0.85 (clamp 60) |
 | Aim FOV | 240 px |
 | Head offset | 0.18 |
 | Miss grace / Switch delay | 2 / 8 |
@@ -84,7 +85,7 @@ Fast acquisition with snap aim for quick reactions.
 | Aim mode | Snap |
 | Speed / Smoothness | 0.72 / 0.45 |
 | Filter | None |
-| Velocity lead | 0.30 (clamp 20) |
+| Velocity lead | 1.10 (clamp 80) |
 | Aim FOV | 220 px |
 | Head offset | 0.15 |
 | Miss grace / Switch delay | 2 / 5 |
@@ -97,8 +98,8 @@ Smoother and more cautious than Default, better for close-range stability.
 |---------|-------|
 | Aim mode | Smooth |
 | Speed / Smoothness | 0.52 / 0.80 |
-| Filter | EMA (alpha 0.22) |
-| Velocity lead | 0.24 (clamp 16) |
+| Filter | EMA (alpha 0.28) |
+| Velocity lead | 0.90 (clamp 65) |
 | Aim FOV | 260 px |
 | Head offset | 0.18 |
 | Miss grace / Switch delay | 2 / 9 |
@@ -112,7 +113,7 @@ Kalman-filtered magnetic aim for maximum lock stability.
 | Aim mode | Magnetic |
 | Speed / Smoothness | 0.58 / 0.88 |
 | Filter | Kalman (process 0.8, measure 5.0) |
-| Velocity lead | 0.18 (clamp 14) |
+| Velocity lead | 0.70 (clamp 50) |
 | Aim FOV | 300 px |
 | Head offset | 0.17 |
 | Miss grace / Switch delay | 2 / 12 |

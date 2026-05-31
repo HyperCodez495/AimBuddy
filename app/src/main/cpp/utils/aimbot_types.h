@@ -50,9 +50,9 @@ struct UnifiedSettings {
     float emaAlpha = 0.25f;  // EMA smoothing factor (lower = smoother, better jitter suppression)
     bool enableConvergenceDamping = true;  // Reduce overshoot near target
     float convergenceRadius = 30.0f;  // Distance for full dampening
-    float pdDerivativeGain = 0.045f;  // Derivative brake (damping) for smooth mode
-    float velocityLeadFactor = 0.28f; // Scales tracked velocity when leading targets
-    float velocityLeadClamp = 18.0f;  // Max lead in pixels per axis
+    float pdDerivativeGain = 0.035f;  // Derivative brake (damping) for smooth mode
+    float velocityLeadFactor = 0.85f; // Scales tracked velocity * lookahead-time
+    float velocityLeadClamp = 60.0f;  // Max lead in pixels per axis
     bool recoilCompensationEnabled = false;
     float recoilCompensationStrength = 0.18f; // Scales adaptive recoil correction
     float recoilCompensationMax = 12.0f;      // Max additional Y correction in px/frame
@@ -77,6 +77,13 @@ struct UnifiedSettings {
     
     bool showTouchZone = true;
     float touchZoneAlpha = 0.3f;
+
+    // Streamer mode: when enabled, overlay windows set FLAG_SECURE so the
+    // ESP/menu are stripped from screen recordings and screenshots.
+    bool streamerMode = false;
+
+    // UI language: 0 = English, 1 = Chinese (中文). Drives ImGui menu text.
+    int32_t language = 0;
     
     int32_t screenWidth = 1080;
     int32_t screenHeight = 2400;
@@ -145,14 +152,15 @@ struct UnifiedSettings {
         maxLockMissFrames = (maxLockMissFrames < 1) ? 1 : (maxLockMissFrames > 30) ? 30 : maxLockMissFrames;
         velocitySmoothing = (velocitySmoothing < 0.05f) ? 0.05f : (velocitySmoothing > 0.95f) ? 0.95f : velocitySmoothing;
         pdDerivativeGain = (pdDerivativeGain < 0.0f) ? 0.0f : (pdDerivativeGain > 0.35f) ? 0.35f : pdDerivativeGain;
-        velocityLeadFactor = (velocityLeadFactor < 0.0f) ? 0.0f : (velocityLeadFactor > 0.8f) ? 0.8f : velocityLeadFactor;
-        velocityLeadClamp = (velocityLeadClamp < 1.0f) ? 1.0f : (velocityLeadClamp > 40.0f) ? 40.0f : velocityLeadClamp;
+        velocityLeadFactor = (velocityLeadFactor < 0.0f) ? 0.0f : (velocityLeadFactor > 1.5f) ? 1.5f : velocityLeadFactor;
+        velocityLeadClamp = (velocityLeadClamp < 1.0f) ? 1.0f : (velocityLeadClamp > 120.0f) ? 120.0f : velocityLeadClamp;
         recoilCompensationStrength = (recoilCompensationStrength < 0.0f) ? 0.0f : (recoilCompensationStrength > 1.5f) ? 1.5f : recoilCompensationStrength;
         recoilCompensationMax = (recoilCompensationMax < 2.0f) ? 2.0f : (recoilCompensationMax > 60.0f) ? 60.0f : recoilCompensationMax;
         recoilCompensationDecay = (recoilCompensationDecay < 0.50f) ? 0.50f : (recoilCompensationDecay > 0.98f) ? 0.98f : recoilCompensationDecay;
         emaAlpha = (emaAlpha < 0.08f) ? 0.08f : (emaAlpha > 0.90f) ? 0.90f : emaAlpha;
         kalmanProcessNoise = (kalmanProcessNoise < 0.01f) ? 0.01f : (kalmanProcessNoise > 20.0f) ? 20.0f : kalmanProcessNoise;
         kalmanMeasurementNoise = (kalmanMeasurementNoise < 0.5f) ? 0.5f : (kalmanMeasurementNoise > 40.0f) ? 40.0f : kalmanMeasurementNoise;
+        language = (language < 0) ? 0 : (language > 1) ? 1 : language;
         
         // Clamp touch position to screen bounds
         if (screenWidth > 0 && screenHeight > 0) {
@@ -170,7 +178,7 @@ struct UnifiedSettings {
     }
 };
 
-static_assert(sizeof(UnifiedSettings) < 512, "Settings struct too large");
+static_assert(sizeof(UnifiedSettings) < 576, "Settings struct too large");
 
 namespace AimbotMath {
     template<typename T>

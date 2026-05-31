@@ -21,6 +21,7 @@ class TrainingPaths:
 @dataclass
 class TrainingParams:
     imgsz: int
+    runtime_imgsz: int
     epochs: int
     batch: int
     patience: int
@@ -34,6 +35,23 @@ class TrainingParams:
     lrf: float
     close_mosaic: int
     single_cls: bool
+
+
+@dataclass
+class AugmentationParams:
+    hsv_h: float = 0.015
+    hsv_s: float = 0.70
+    hsv_v: float = 0.45
+    degrees: float = 5.0
+    translate: float = 0.10
+    scale: float = 0.60
+    shear: float = 2.0
+    perspective: float = 0.0
+    flipud: float = 0.0
+    fliplr: float = 0.50
+    mosaic: float = 1.0
+    mixup: float = 0.15
+    copy_paste: float = 0.30
 
 
 @dataclass
@@ -57,6 +75,7 @@ class ExportParams:
 class TrainingConfig:
     paths: TrainingPaths
     training: TrainingParams
+    augmentation: AugmentationParams
     adaptive: AdaptiveParams
     export: ExportParams
 
@@ -89,7 +108,8 @@ def load_config(config_path: Path | None = None) -> TrainingConfig:
     )
 
     training = TrainingParams(
-        imgsz=parser.getint("training", "imgsz", fallback=256),
+        imgsz=parser.getint("training", "imgsz", fallback=640),
+        runtime_imgsz=parser.getint("training", "runtime_imgsz", fallback=256),
         epochs=parser.getint("training", "epochs", fallback=180),
         batch=parser.getint("training", "batch", fallback=16),
         patience=parser.getint("training", "patience", fallback=25),
@@ -101,8 +121,24 @@ def load_config(config_path: Path | None = None) -> TrainingConfig:
         optimizer=parser.get("training", "optimizer", fallback="AdamW"),
         lr0=parser.getfloat("training", "lr0", fallback=0.01),
         lrf=parser.getfloat("training", "lrf", fallback=0.01),
-        close_mosaic=parser.getint("training", "close_mosaic", fallback=10),
+        close_mosaic=parser.getint("training", "close_mosaic", fallback=15),
         single_cls=_get_bool(parser, "training", "single_cls", True),
+    )
+
+    augmentation = AugmentationParams(
+        hsv_h=parser.getfloat("augmentation", "hsv_h", fallback=0.015),
+        hsv_s=parser.getfloat("augmentation", "hsv_s", fallback=0.70),
+        hsv_v=parser.getfloat("augmentation", "hsv_v", fallback=0.45),
+        degrees=parser.getfloat("augmentation", "degrees", fallback=5.0),
+        translate=parser.getfloat("augmentation", "translate", fallback=0.10),
+        scale=parser.getfloat("augmentation", "scale", fallback=0.60),
+        shear=parser.getfloat("augmentation", "shear", fallback=2.0),
+        perspective=parser.getfloat("augmentation", "perspective", fallback=0.0),
+        flipud=parser.getfloat("augmentation", "flipud", fallback=0.0),
+        fliplr=parser.getfloat("augmentation", "fliplr", fallback=0.50),
+        mosaic=parser.getfloat("augmentation", "mosaic", fallback=1.0),
+        mixup=parser.getfloat("augmentation", "mixup", fallback=0.15),
+        copy_paste=parser.getfloat("augmentation", "copy_paste", fallback=0.30),
     )
 
     adaptive = AdaptiveParams(
@@ -120,7 +156,13 @@ def load_config(config_path: Path | None = None) -> TrainingConfig:
         batch=parser.getint("export", "batch", fallback=1),
     )
 
-    return TrainingConfig(paths=paths, training=training, adaptive=adaptive, export=export)
+    return TrainingConfig(
+        paths=paths,
+        training=training,
+        augmentation=augmentation,
+        adaptive=adaptive,
+        export=export,
+    )
 
 
 def count_training_images(dataset_dir: Path) -> int:

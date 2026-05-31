@@ -43,6 +43,9 @@ training/
     05_train_manual.bat
     06_export_ncnn.bat
     07_run_full_pipeline.bat
+    08_auto_label.bat          (teacher-driven auto-labelling)
+    09_mine_negatives.bat      (empty-label samples to suppress FPs)
+    10_active_learning.bat     (find frames worth labelling next)
   src/
   videos/
   requirements.txt
@@ -57,9 +60,12 @@ Run in this order when executing manually:
 
 1. `scripts\01_setup_environment.bat` (creates `.venv`, installs deps, and ensures `yolo26n.pt`)
 2. `scripts\02_extract_frames.bat` (optional if starting from videos)
-3. `scripts\03_validate_dataset.bat`
-4. `scripts\04_train_adaptive.bat` or `scripts\05_train_manual.bat`
-5. `scripts\06_export_ncnn.bat`
+3. `scripts\08_auto_label.bat` (optional but recommended - skip 90%+ of manual labelling)
+4. `scripts\09_mine_negatives.bat` (optional - drop no-enemy frames in `raw_frames\negatives\` first)
+5. `scripts\03_validate_dataset.bat`
+6. `scripts\04_train_adaptive.bat` or `scripts\05_train_manual.bat`
+7. `scripts\06_export_ncnn.bat`
+8. `scripts\10_active_learning.bat` (after first training - surfaces frames worth labelling next)
 
 One-command path:
 

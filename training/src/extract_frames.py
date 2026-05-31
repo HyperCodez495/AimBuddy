@@ -20,14 +20,35 @@ def _list_videos(videos_dir: Path) -> list[Path]:
     return [p for p in videos_dir.iterdir() if p.suffix.lower() in VIDEO_EXTENSIONS]
 
 
-def _preprocess_frame(frame, target_imgsz: int, crop_size: int):
+def _preprocess_frame(frame, target_imgsz: int, source_crop: int, capture_height: int = 720):
+    """Mirror the runtime preprocessing pipeline so training distribution
+    matches deployment distribution.
+
+    Runtime path (esp_jni.cpp + yolo_detector.cpp::preprocess):
+      1. ImageReader hands us a `capture_height`p RGBA buffer
+         (CAPTURE_WIDTH x CAPTURE_HEIGHT = 1280 x 720).
+      2. Center-crop a square of side `source_crop` (adaptive 224-320 at
+         runtime; defaults to 320 here for the maximum runtime crop).
+      3. Resize the cropped square to MODEL_INPUT_SIZE.
+      4. Convert to RGB, scale to [0, 1].
+
+    The training-time frames produced here keep the same crop window  - 
+    we just upscale to `target_imgsz` (default 640) so the trainer sees
+    more pixel detail than the runtime model will, while the FOV the
+    network learns is identical. Color stays in BGR on disk (cv2 default,
+    Ultralytics swaps to RGB internally when loading), matching the
+    auto-label pipeline.
+    """
     h, w = frame.shape[:2]
-    scale = 720.0 / max(1, h)
+    # Step 1: scale source to runtime capture height so the crop size is
+    # interpreted against the same canvas as the runtime path.
+    scale = float(capture_height) / max(1, h)
     scaled_w = int(w * scale)
-    scaled_h = 720
+    scaled_h = capture_height
     resized = cv2.resize(frame, (scaled_w, scaled_h))
 
-    actual_crop = min(crop_size, scaled_w, scaled_h)
+    # Step 2: center crop a square matching the runtime CROP_SIZE policy.
+    actual_crop = min(source_crop, scaled_w, scaled_h)
     cx = scaled_w // 2
     cy = scaled_h // 2
     half = actual_crop // 2
@@ -37,10 +58,12 @@ def _preprocess_frame(frame, target_imgsz: int, crop_size: int):
     if cropped.size == 0:
         return None
 
-    return cv2.resize(cropped, (target_imgsz, target_imgsz))
+    # Step 3: upscale to training resolution. Training >= runtime so the
+    # network learns small features the runtime model will then run on.
+    return cv2.resize(cropped, (target_imgsz, target_imgsz), interpolation=cv2.INTER_AREA if target_imgsz < actual_crop else cv2.INTER_LINEAR)
 
 
-def _process_video(video_path: Path, output_root: Path, target_imgsz: int, fps_extract: float, crop_size: int) -> tuple[int, bool]:
+def _process_video(video_path: Path, output_root: Path, target_imgsz: int, fps_extract: float, source_crop: int, capture_height: int) -> tuple[int, bool]:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         print(f"Skipping unreadable video: {video_path.name}")
@@ -63,7 +86,7 @@ def _process_video(video_path: Path, output_root: Path, target_imgsz: int, fps_e
                 break
 
             if frame_idx % interval == 0:
-                final = _preprocess_frame(frame, target_imgsz, crop_size)
+                final = _preprocess_frame(frame, target_imgsz, source_crop, capture_height)
                 if final is not None:
                     out_file = out_dir / f"{video_path.stem}_frame_{saved:05d}.jpg"
                     cv2.imwrite(str(out_file), final)
@@ -77,7 +100,13 @@ def _process_video(video_path: Path, output_root: Path, target_imgsz: int, fps_e
     return saved, False
 
 
-def extract(config_path: Path | None = None, fps_extract: float = 1.0, crop_size: int = 480) -> int:
+def extract(
+    config_path: Path | None = None,
+    fps_extract: float = 1.0,
+    source_crop: int = 320,
+    capture_height: int = 720,
+    target_imgsz: int | None = None,
+) -> int:
     cfg = load_config(config_path)
     ensure_workspace_structure(cfg)
     videos_dir = cfg.paths.videos_dir
@@ -85,16 +114,18 @@ def extract(config_path: Path | None = None, fps_extract: float = 1.0, crop_size
     output_root.mkdir(parents=True, exist_ok=True)
 
     videos = _list_videos(videos_dir)
-
     if not videos:
         print(f"No videos found in {videos_dir}")
         return 1
+
+    imgsz = target_imgsz if target_imgsz is not None else cfg.training.imgsz
+    print(f"Extracting frames at imgsz={imgsz}, source_crop={source_crop} (runtime CROP_SIZE=320), capture_height={capture_height} (runtime CAPTURE_HEIGHT=720)")
 
     had_error = False
     total_saved = 0
 
     for video_path in videos:
-        saved, error = _process_video(video_path, output_root, cfg.training.imgsz, fps_extract, crop_size)
+        saved, error = _process_video(video_path, output_root, imgsz, fps_extract, source_crop, capture_height)
         total_saved += saved
         had_error = had_error or error
 
@@ -107,9 +138,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Extract training frames using runtime-aligned preprocessing")
     parser.add_argument("--config", type=Path, default=None, help="Path to config/config.ini")
     parser.add_argument("--fps", type=float, default=1.0, help="Frames to extract per second")
-    parser.add_argument("--crop", type=int, default=480, help="Center crop size before resize")
+    parser.add_argument("--source-crop", type=int, default=320, help="Center crop size on the capture canvas (default 320 = matches runtime CROP_SIZE)")
+    parser.add_argument("--capture-height", type=int, default=720, help="Capture height the crop is measured against (default 720 = matches runtime CAPTURE_HEIGHT)")
+    parser.add_argument("--imgsz", type=int, default=None, help="Override training image size (default = [training] imgsz from config)")
     args = parser.parse_args()
-    return extract(args.config, args.fps, args.crop)
+    return extract(args.config, args.fps, args.source_crop, args.capture_height, args.imgsz)
 
 
 if __name__ == "__main__":
