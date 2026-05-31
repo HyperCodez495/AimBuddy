@@ -33,6 +33,11 @@ local.properties
 *.lib
 *.pdb
 
+# NCNN vendored static libs are required for CMake to link.
+# Whitelist the prebuilt arm64-v8a archives so they ship in the repo
+# (~15 MB, well inside GitHub's per-file/per-repo soft limits).
+!app/src/main/cpp/ncnn/lib/**/*.a
+
 # Python virtual environments and caches
 .venv/
 venv/
