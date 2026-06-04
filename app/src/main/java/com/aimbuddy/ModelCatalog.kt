@@ -85,6 +85,38 @@ class ModelCatalog(private val context: Context) {
         }
     }
 
+    fun deleteModel(modelId: String): Boolean {
+        if (modelId == ASSET_MODEL_ID) return false
+        val models = loadInstalledModels().toMutableList()
+        val model = models.firstOrNull { it.id == modelId } ?: return false
+        
+        models.remove(model)
+        saveInstalledModels(models)
+
+        try {
+            model.paramPath?.let { path ->
+                val f = File(path)
+                if (f.exists()) f.delete()
+                val parentDir = f.parentFile
+                if (parentDir != null && parentDir.name == modelId && parentDir.parentFile?.name == "models") {
+                    parentDir.deleteRecursively()
+                }
+            }
+            model.binPath?.let { path ->
+                val f = File(path)
+                if (f.exists()) f.delete()
+            }
+        } catch (_: Exception) {}
+
+        val activeId = prefs.getString(KEY_ACTIVE_MODEL_ID, null)
+        if (activeId == modelId) {
+            val fallback = models.firstOrNull { it.source == ModelSource.ASSET }
+                ?: models.firstOrNull { it.canUse() }
+            prefs.edit().putString(KEY_ACTIVE_MODEL_ID, fallback?.id).apply()
+        }
+        return true
+    }
+
     fun setActiveModel(modelId: String): Boolean {
         val model = loadInstalledModels().firstOrNull { it.id == modelId } ?: return false
         if (!model.canUse()) {

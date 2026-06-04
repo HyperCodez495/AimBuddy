@@ -58,6 +58,22 @@ Possible causes:
 2. Vulkan not supported on the device. Check `adb logcat -s AimBuddy_Native:E` for GPU initialization errors.
 3. Incorrect ABI. AimBuddy only supports `arm64-v8a`.
 
+### App Fails to Install ("Package Appears to be Invalid" / "App Not Installed")
+
+Symptoms:
+- Sideloading the release APK fails with a package parsing or installation error.
+
+Cause:
+- Android requires all sideloaded APKs to be cryptographically signed. If an APK is unsigned, the package manager rejects it with an invalid package error.
+
+Fix:
+- We have configured the release build type in `app/build.gradle` to automatically sign release builds using the debug key configuration by default.
+- If you are building locally or on GitHub without repository secrets, the output APK will still be signed and installable.
+- To verify if your APK is signed, use:
+  ```powershell
+  apksigner verify --verbose app-release.apk
+  ```
+
 ## Runtime Issues
 
 ### No Detections Showing

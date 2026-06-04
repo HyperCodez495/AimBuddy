@@ -98,6 +98,29 @@ import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import rikka.shizuku.Shizuku
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.shadow
 
 // Minimal dark palette tuned for the launcher and the small set of
 // state colors used on the status pill / backend chips. Kept here as
@@ -182,6 +205,11 @@ class MainActivity : AppCompatActivity() {
     private var isRunningState by mutableStateOf(false)
     private var statusTextState by mutableStateOf("Status: Model Loading")
     private var activeModelTextState by mutableStateOf("Model: Auto")
+    private var showStoreState by mutableStateOf(false)
+    private var isFetchingStoreState by mutableStateOf(false)
+    private var storeModelsState by mutableStateOf<List<StoreModelDefinition>>(emptyList())
+    private var downloadingModelIdState by mutableStateOf<String?>(null)
+    private var installedModelsState by mutableStateOf<List<InstalledModel>>(emptyList())
 
     // Overlay components
     private var imguiOverlay: ImGuiGLSurface? = null
@@ -863,6 +891,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyActiveModelSelection() {
         val active = modelCatalog.getActiveModel()
+        installedModelsState = modelCatalog.getInstalledModels()
         if (active == null) {
             nativeSetModelPaths(null, null)
             activeModelTextState = "Model: Missing"
@@ -905,7 +934,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onStoreClicked() {
-        showModelSwitcherDialog()
+        openModelStore()
     }
 
     private fun migrateLegacySingleImportedModel() {
@@ -934,126 +963,33 @@ class MainActivity : AppCompatActivity() {
         modelCatalog.addOrUpdateModel(legacyModel, makeActive = false)
     }
 
-    private fun showModelSwitcherDialog() {
-        val models = modelCatalog.getInstalledModels()
-        if (models.isEmpty()) {
-            showAppToast("No models installed. Import locally or open store.", true)
-            return
+    private fun openModelStore() {
+        showStoreState = true
+        if (storeModelsState.isEmpty()) {
+            fetchStoreModelsAsync()
         }
-
-        val activeId = modelCatalog.getActiveModel()?.id
-        val selectedIndex = models.indexOfFirst { it.id == activeId }.coerceAtLeast(0)
-        var chosen = selectedIndex
-
-        val labels = models.map {
-            val size = if (it.totalSizeBytes > 0L) " - ${formatBytes(it.totalSizeBytes)}" else ""
-            "${it.title} [${it.source.name.lowercase()}]$size"
-        }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("Select Active Model")
-            .setSingleChoiceItems(labels, selectedIndex) { _, which ->
-                chosen = which
-            }
-            .setPositiveButton("Use") { _, _ ->
-                val chosenModel = models[chosen]
-                if (modelCatalog.setActiveModel(chosenModel.id)) {
-                    applyActiveModelSelection()
-                    reinitializeNativeIfIdle()
-                } else {
-                    showAppToast("Selected model is not available", true)
-                }
-            }
-            .setNeutralButton("Store") { _, _ ->
-                showStoreDialog()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
     }
 
-    private fun showStoreDialog() {
-        showAppToast("Loading model store...", false)
+    private fun fetchStoreModelsAsync() {
+        isFetchingStoreState = true
         thread(start = true, name = "aimbuddy-store-fetch") {
             try {
                 val models = storeRepository.fetchAvailableModels()
                 runOnUiThread {
-                    showStoreListDialog(models)
+                    storeModelsState = models
+                    isFetchingStoreState = false
                 }
             } catch (e: Exception) {
                 runOnUiThread {
+                    isFetchingStoreState = false
                     showAppToast("Store fetch failed: ${e.message}", true)
                 }
             }
         }
     }
 
-    private fun showStoreListDialog(storeModels: List<StoreModelDefinition>) {
-        if (storeModels.isEmpty()) {
-            showAppToast("No models available in store folder yet", true)
-            return
-        }
-
-        val installedIds = modelCatalog.getInstalledModels().map { it.id }.toSet()
-        val labels = storeModels.map { model ->
-            val installed = if (installedIds.contains(model.id)) " (installed)" else ""
-            val demo = if (!model.isDownloadable) " [demo]" else ""
-            val size = if (model.totalSizeBytes > 0L) formatBytes(model.totalSizeBytes) else "metadata only"
-            "${model.title}$demo - $size$installed"
-        }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("Model Store")
-            .setItems(labels) { _, which ->
-                val selected = storeModels[which]
-                showStoreModelDetailDialog(selected)
-            }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
-    private fun showStoreModelDetailDialog(model: StoreModelDefinition) {
-        val existing = modelCatalog.getInstalledModels().firstOrNull { it.id == model.id }
-        val details = StringBuilder()
-            .append(model.title)
-            .append("\n\n")
-            .append(model.description)
-            .append("\n\n")
-            .append("Param: ")
-            .append(formatBytes(model.paramSizeBytes))
-            .append("\n")
-            .append("Bin: ")
-            .append(formatBytes(model.binSizeBytes))
-            .append("\n")
-            .append("Total: ")
-            .append(formatBytes(model.totalSizeBytes))
-            .append("\n")
-            .append("Type: ")
-            .append(if (model.isDownloadable) "Downloadable" else "Demo / Metadata only")
-            .toString()
-
-        val builder = AlertDialog.Builder(this)
-            .setTitle("Store Model")
-            .setMessage(details)
-            .setNegativeButton("Back", null)
-
-        if (existing != null && existing.canUse()) {
-            builder.setPositiveButton("Use") { _, _ ->
-                modelCatalog.setActiveModel(existing.id)
-                applyActiveModelSelection()
-                reinitializeNativeIfIdle()
-            }
-        } else if (model.isDownloadable) {
-            builder.setPositiveButton("Download") { _, _ ->
-                downloadStoreModel(model)
-            }
-        } else {
-            builder.setPositiveButton("OK", null)
-        }
-
-        builder.show()
-    }
-
-    private fun downloadStoreModel(model: StoreModelDefinition) {
+    private fun downloadStoreModelAsync(model: StoreModelDefinition) {
+        downloadingModelIdState = model.id
         showAppToast("Downloading ${model.title}...", false)
         thread(start = true, name = "aimbuddy-store-download") {
             try {
@@ -1073,16 +1009,35 @@ class MainActivity : AppCompatActivity() {
                 modelCatalog.addOrUpdateModel(installed, makeActive = true)
 
                 runOnUiThread {
+                    downloadingModelIdState = null
                     applyActiveModelSelection()
                     reinitializeNativeIfIdle()
                     showAppToast("Downloaded and switched to ${model.title}", false)
                 }
             } catch (e: Exception) {
                 runOnUiThread {
+                    downloadingModelIdState = null
                     showAppToast("Download failed: ${e.message}", true)
                 }
             }
         }
+    }
+
+    private fun showDeleteModelConfirmationDialog(model: InstalledModel) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete Model")
+            .setMessage("Are you sure you want to permanently delete \"${model.title}\" and free up space?")
+            .setPositiveButton("Delete") { _, _ ->
+                if (modelCatalog.deleteModel(model.id)) {
+                    applyActiveModelSelection()
+                    reinitializeNativeIfIdle()
+                    showAppToast("Model deleted successfully", false)
+                } else {
+                    showAppToast("Failed to delete model", true)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun formatBytes(bytes: Long): String {
@@ -1470,142 +1425,359 @@ class MainActivity : AppCompatActivity() {
         var menuOpen by remember { mutableStateOf(false) }
         val statusColor = statusAccentFor(statusText, isRunning)
 
-        Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
-            topBar = {
-                CenterAlignedTopAppBar(
-                    title = {
-                        Text(
-                            text = "AimBuddy",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    },
-                    actions = {
-                        IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Filled.MoreVert, contentDescription = "More")
-                        }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Import model files") },
-                                leadingIcon = { Icon(Icons.Filled.FolderOpen, null) },
-                                onClick = { menuOpen = false; onImportModel() },
+        Box(modifier = Modifier.fillMaxSize()) {
+            Scaffold(
+                containerColor = MaterialTheme.colorScheme.background,
+                topBar = {
+                    CenterAlignedTopAppBar(
+                        title = {
+                            Text(
+                                text = "AimBuddy",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.SemiBold,
                             )
-                            DropdownMenuItem(
-                                text = { Text("Model store") },
-                                leadingIcon = { Icon(Icons.Filled.Download, null) },
-                                onClick = { menuOpen = false; onOpenStore() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("View on GitHub") },
-                                leadingIcon = { Icon(Icons.Filled.Info, null) },
-                                onClick = { menuOpen = false; onOpenGithub() },
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.background,
-                    ),
-                )
-            },
-        ) { inner ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(inner)
-                    .padding(horizontal = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(20.dp),
-            ) {
-                Spacer(Modifier.height(8.dp))
-
-                StatusCard(
-                    statusText = statusText.removePrefix("Status: "),
-                    accent = statusColor,
-                    isRunning = isRunning,
-                )
-
-                BackendChips(rootReady = rootReady, shizukuReady = shizukuReady)
-
-                Text(
-                    text = activeModelText,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-
-                Spacer(Modifier.height(4.dp))
-
-                FilledTonalButton(
-                    onClick = if (isRunning) onStop else onStart,
+                        },
+                        actions = {
+                            IconButton(onClick = { menuOpen = true }) {
+                                Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                            }
+                        },
+                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.background,
+                        ),
+                    )
+                },
+            ) { inner ->
+                Row(
                     modifier = Modifier
-                        .widthIn(min = 220.dp)
-                        .heightIn(min = 56.dp),
-                    shape = RoundedCornerShape(28.dp),
+                        .fillMaxSize()
+                        .padding(inner)
+                        .padding(horizontal = 24.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = if (isRunning) Icons.Filled.Stop else Icons.Filled.PlayArrow,
-                        contentDescription = null,
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        text = if (isRunning) "Stop" else "Start",
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 17.sp,
-                    )
+                    // Left Panel: Status & Active Model
+                    Column(
+                        modifier = Modifier
+                            .weight(1.2f)
+                            .fillMaxHeight(),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.Start
+                    ) {
+                        StatusCard(
+                            statusText = statusText,
+                            accent = statusColor,
+                            isRunning = isRunning,
+                        )
+                        
+                        Spacer(Modifier.height(12.dp))
+                        
+                        ActiveModelCard(
+                            activeModelText = activeModelText,
+                            onSelectModel = { onOpenStore() }
+                        )
+                    }
+
+                    // Right Panel: Primary Toggle & Backend Status
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        PrimaryActionButton(
+                            isRunning = isRunning,
+                            onClick = if (isRunning) onStop else onStart
+                        )
+
+                        Spacer(Modifier.height(14.dp))
+
+                        Text(
+                            text = "Touch Input Backends",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+
+                        BackendChips(rootReady = rootReady, shizukuReady = shizukuReady)
+
+                        Spacer(Modifier.height(14.dp))
+
+                        Text(
+                            text = "Open source - created by $CREATOR_NAME",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                            modifier = Modifier
+                                .clickable { onOpenCreator() }
+                                .padding(vertical = 4.dp)
+                        )
+                    }
                 }
+            }
 
-                Spacer(Modifier.weight(1f))
-
-                Text(
-                    text = "Open source - created by $CREATOR_NAME",
+            // In-window custom Dropdown Menu Overlay
+            if (menuOpen) {
+                // Click catcher
+                Box(
                     modifier = Modifier
-                        .clickable { onOpenCreator() }
-                        .padding(bottom = 16.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.2f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { menuOpen = false }
+                )
+                
+                // Dropdown Card positioned at Top-End
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 56.dp, end = 16.dp)
+                        .width(220.dp)
+                        .shadow(12.dp, RoundedCornerShape(14.dp)),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+                ) {
+                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                        DropdownMenuItemContent(
+                            text = "Import model files",
+                            icon = Icons.Filled.FolderOpen,
+                            onClick = { menuOpen = false; onImportModel() }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
+                        DropdownMenuItemContent(
+                            text = "Model store",
+                            icon = Icons.Filled.Download,
+                            onClick = { menuOpen = false; onOpenStore() }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
+                        DropdownMenuItemContent(
+                            text = "View on GitHub",
+                            icon = Icons.Filled.Info,
+                            onClick = { menuOpen = false; onOpenGithub() }
+                        )
+                    }
+                }
+            }
+
+            // Custom Compose Model Store Screen overlay
+            if (showStoreState) {
+                ModelStoreScreen(
+                    onClose = { showStoreState = false },
+                    onImportModel = onImportModel
                 )
             }
         }
     }
 
     @Composable
+    private fun DropdownMenuItemContent(
+        text: String,
+        icon: ImageVector,
+        onClick: () -> Unit
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onClick() }
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+
+    private fun mapStatusToDisplayTitle(status: String): String {
+        val raw = status.removePrefix("Status: ").trim()
+        return when (raw) {
+            "Model Loading" -> "Initializing Model"
+            "Init Failed" -> "Setup Failed"
+            "Ready" -> "System Ready"
+            "Waiting for Root Permission" -> "Root Request Pending"
+            "Root Granted" -> "Root Access Confirmed"
+            "Using Shizuku Backend" -> "Shizuku Backend Active"
+            "Waiting for Shizuku Permission" -> "Shizuku Request Pending"
+            "Using Root Backend" -> "Root Backend Active"
+            "Shizuku Not Connected" -> "Shizuku Offline"
+            "Waiting for Screen Capture Permission" -> "Capture Auth Pending"
+            "Starting" -> "Starting Service"
+            "Stopping" -> "Stopping Service"
+            "Running" -> "Service Active"
+            else -> raw
+        }
+    }
+
+    private fun mapStatusToDisplayDescription(status: String): String {
+        val raw = status.removePrefix("Status: ").trim()
+        return when (raw) {
+            "Model Loading" -> "Mapping memory buffers and initializing weights..."
+            "Init Failed" -> "Engine initialization failed. Please check your model files."
+            "Ready" -> "System configured. Tap START SERVICE below to begin."
+            "Waiting for Root Permission" -> "Please grant Superuser authorization when prompted."
+            "Root Granted" -> "Superuser access verified. Mounting touch inputs."
+            "Using Shizuku Backend" -> "Synthetic touch events routed via Shizuku wrapper."
+            "Waiting for Shizuku Permission" -> "Please authorize Shizuku shell manager when prompted."
+            "Using Root Backend" -> "Synthetic touch events injected directly to /dev/uinput."
+            "Shizuku Not Connected" -> "Start Shizuku server inside the Shizuku Manager app."
+            "Waiting for Screen Capture Permission" -> "Please confirm screen projection permission in dialog."
+            "Starting" -> "Instantiating virtual devices and capture threads..."
+            "Stopping" -> "Disposing graphics surfaces and stopping background tasks..."
+            "Running" -> "Drawing ESP overlay dynamically on top of capture buffers."
+            else -> "System state: $raw"
+        }
+    }
+
+    @Composable
     private fun StatusCard(statusText: String, accent: Color, isRunning: Boolean) {
+        val displayTitle = mapStatusToDisplayTitle(statusText)
+        val displayDescription = mapStatusToDisplayDescription(statusText)
+        
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
             ),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)),
             elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         ) {
-            Column(
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 22.dp, vertical = 18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Start
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(accent),
-                    )
-                    Spacer(Modifier.width(10.dp))
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(accent)
+                        .border(
+                            2.dp,
+                            accent.copy(alpha = 0.4f),
+                            CircleShape
+                        )
+                )
+                Spacer(Modifier.width(16.dp))
+                Column {
                     Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Medium,
+                        text = displayTitle,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = displayDescription,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2
                     )
                 }
+            }
+        }
+    }
+
+    @Composable
+    private fun ActiveModelCard(activeModelText: String, onSelectModel: () -> Unit) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onSelectModel() },
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
+            ),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.08f)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "ACTIVE MODEL",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = activeModelText.removePrefix("Model: "),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Filled.FolderOpen,
+                    contentDescription = "Manage Models",
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun PrimaryActionButton(isRunning: Boolean, onClick: () -> Unit) {
+        val containerColor = if (isRunning) Color(0xFFDC2626) else MaterialTheme.colorScheme.primary
+        val contentColor = if (isRunning) Color.White else Color(0xFF070B13)
+        val icon = if (isRunning) Icons.Filled.Stop else Icons.Filled.PlayArrow
+        val label = if (isRunning) "STOP SERVICE" else "START SERVICE"
+        
+        Card(
+            modifier = Modifier
+                .width(220.dp)
+                .height(52.dp)
+                .clickable { onClick() }
+                .shadow(6.dp, RoundedCornerShape(26.dp)),
+            shape = RoundedCornerShape(26.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = containerColor,
+                contentColor = contentColor
+            )
+        ) {
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(Modifier.width(8.dp))
                 Text(
-                    text = if (isRunning) "Capture pipeline live" else "Tap Start to begin capture and overlay",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
+                    text = label,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    letterSpacing = 0.8.sp
                 )
             }
         }
@@ -1614,11 +1786,11 @@ class MainActivity : AppCompatActivity() {
     @Composable
     private fun BackendChips(rootReady: Boolean, shizukuReady: Boolean) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
         ) {
             BackendChip(label = "Root", ready = rootReady)
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(12.dp))
             BackendChip(label = "Shizuku", ready = shizukuReady)
         }
     }
@@ -1628,7 +1800,7 @@ class MainActivity : AppCompatActivity() {
         val color = if (ready) StatusGreen else MaterialTheme.colorScheme.onSurfaceVariant
         AssistChip(
             onClick = {},
-            label = { Text(label, fontWeight = FontWeight.Medium) },
+            label = { Text(label, fontWeight = FontWeight.SemiBold, fontSize = 12.sp) },
             leadingIcon = {
                 Box(
                     modifier = Modifier
@@ -1638,9 +1810,435 @@ class MainActivity : AppCompatActivity() {
                 )
             },
             colors = AssistChipDefaults.assistChipColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
             ),
+            shape = RoundedCornerShape(10.dp)
         )
+    }
+
+    @Composable
+    private fun ModelStoreScreen(
+        onClose: () -> Unit,
+        onImportModel: () -> Unit
+    ) {
+        var selectedTab by remember { mutableStateOf(0) }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp, vertical = 16.dp)
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onClose) {
+                            Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Model Store",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (selectedTab == 0) {
+                            IconButton(
+                                onClick = { fetchStoreModelsAsync() },
+                                enabled = !isFetchingStoreState
+                            ) {
+                                if (isFetchingStoreState) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                } else {
+                                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                                }
+                            }
+                        }
+                        
+                        Spacer(Modifier.width(12.dp))
+                        
+                        OutlinedButton(
+                            onClick = onImportModel,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                        ) {
+                            Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Import Local", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Tab Selector
+                TabRow(
+                    selectedTabIndex = selectedTab,
+                    containerColor = Color.Transparent,
+                    divider = { HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.08f)) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Tab(
+                        selected = selectedTab == 0,
+                        onClick = { selectedTab = 0 },
+                        text = { Text("Store Catalog", fontWeight = FontWeight.Bold) }
+                    )
+                    Tab(
+                        selected = selectedTab == 1,
+                        onClick = { selectedTab = 1 },
+                        text = { Text("My Models (${installedModelsState.size})", fontWeight = FontWeight.Bold) }
+                    )
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                // Tab Content
+                Box(modifier = Modifier.weight(1f)) {
+                    if (selectedTab == 0) {
+                        CatalogTabContent()
+                    } else {
+                        InstalledTabContent()
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun CatalogTabContent() {
+        if (isFetchingStoreState && storeModelsState.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.height(12.dp))
+                    Text("Fetching catalog from GitHub...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        } else if (storeModelsState.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("No models available in store.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(onClick = { fetchStoreModelsAsync() }) {
+                        Text("Retry Fetch")
+                    }
+                }
+            }
+        } else {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(storeModelsState) { model ->
+                    val isInstalled = installedModelsState.any { it.id == model.id }
+                    val isDownloading = downloadingModelIdState == model.id
+                    val isActive = modelCatalog.getActiveModel()?.id == model.id
+                    
+                    CatalogModelCard(
+                        model = model,
+                        isInstalled = isInstalled,
+                        isActive = isActive,
+                        isDownloading = isDownloading,
+                        onDownload = { downloadStoreModelAsync(model) },
+                        onUse = {
+                            if (modelCatalog.setActiveModel(model.id)) {
+                                applyActiveModelSelection()
+                                reinitializeNativeIfIdle()
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun CatalogModelCard(
+        model: StoreModelDefinition,
+        isInstalled: Boolean,
+        isActive: Boolean,
+        isDownloading: Boolean,
+        onDownload: () -> Unit,
+        onUse: () -> Unit
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+            ),
+            border = BorderStroke(
+                1.dp,
+                if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                else MaterialTheme.colorScheme.outline.copy(alpha = 0.08f)
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = model.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (isActive) {
+                                Spacer(Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = "ACTIVE",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = model.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    
+                    Spacer(Modifier.width(16.dp))
+                    
+                    Box {
+                        if (isDownloading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                strokeWidth = 2.5.dp
+                            )
+                        } else if (isActive) {
+                            // Already active
+                        } else if (isInstalled) {
+                            OutlinedButton(
+                                onClick = onUse,
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Text("Use", style = MaterialTheme.typography.labelMedium)
+                            }
+                        } else if (model.isDownloadable) {
+                            FilledTonalButton(
+                                onClick = onDownload,
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Text("Download", style = MaterialTheme.typography.labelMedium)
+                            }
+                        } else {
+                            Text(
+                                text = "Demo",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(10.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Start,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val sizeStr = if (model.totalSizeBytes > 0L) formatBytes(model.totalSizeBytes) else "metadata only"
+                    Text(
+                        text = "Size: $sizeStr",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Text(
+                        text = if (model.isDownloadable) "Downloadable" else "Metadata only",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun InstalledTabContent() {
+        if (installedModelsState.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = "No models installed. Import model files or download from store.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(installedModelsState) { model ->
+                    val isActive = modelCatalog.getActiveModel()?.id == model.id
+                    InstalledModelCard(
+                        model = model,
+                        isActive = isActive,
+                        onUse = {
+                            if (modelCatalog.setActiveModel(model.id)) {
+                                applyActiveModelSelection()
+                                reinitializeNativeIfIdle()
+                            }
+                        },
+                        onDelete = {
+                            showDeleteModelConfirmationDialog(model)
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun InstalledModelCard(
+        model: InstalledModel,
+        isActive: Boolean,
+        onUse: () -> Unit,
+        onDelete: () -> Unit
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+            ),
+            border = BorderStroke(
+                1.dp,
+                if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                else MaterialTheme.colorScheme.outline.copy(alpha = 0.08f)
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = model.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (isActive) {
+                                Spacer(Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = "ACTIVE",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = model.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    
+                    Spacer(Modifier.width(16.dp))
+                    
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (!isActive) {
+                            OutlinedButton(
+                                onClick = onUse,
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Text("Use", style = MaterialTheme.typography.labelMedium)
+                            }
+                            
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        
+                        if (model.id != "asset-default") {
+                            IconButton(onClick = onDelete) {
+                                Icon(
+                                    imageVector = Icons.Filled.Delete,
+                                    contentDescription = "Delete Model",
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                }
+                
+                Spacer(Modifier.height(10.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Start,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val sizeStr = if (model.totalSizeBytes > 0L) formatBytes(model.totalSizeBytes) else "n/a"
+                    Text(
+                        text = "Size: $sizeStr",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Text(
+                        text = "Source: ${model.source.name.lowercase()}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
     }
 
     @Composable
@@ -1653,7 +2251,7 @@ class MainActivity : AppCompatActivity() {
             else -> StatusGrey
         }
     }
-    
+
     private fun beginAsyncRootCheck(onCompleted: ((Boolean) -> Unit)? = null) {
         if (!rootCheckInProgress.compareAndSet(false, true)) {
             Log.i(TAG, "Root check already in progress")
@@ -1670,9 +2268,6 @@ class MainActivity : AppCompatActivity() {
 
                 if (hasRoot) {
                     Log.i(TAG, "Root available  -  initializing aimbot")
-                    // Guard: only call nativeInitAimbot if native init already succeeded.
-                    // nativeIsRunning() == false here just means inference not started yet  - 
-                    // nativeInit success is tracked by statusTextState not being "Init Failed".
                     if (statusTextState != "Status: Init Failed") {
                         if (nativeInitAimbot()) {
                             Log.i(TAG, "Aimbot initialized successfully")

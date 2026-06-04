@@ -10,6 +10,24 @@ Pre-release work staged for the next tag.
 
 ---
 
+## [0.3.0-beta.2] - 2026-06-04
+
+UX overhaul and critical APK installation fix.
+
+### Added
+- Premium Compose-based Model Store UI replacing legacy Alert Dialogs. Features tabs for browsing available models from GitHub and managing installed models with options to download, switch, and delete models.
+- Support for deleting downloaded/imported model files through the UI.
+
+### Fixed
+- Fixed immersive landscape layout breaking/shifting by implementing an in-window animated menu overlay for the 3-dot dropdown, avoiding system bar visibility toggles caused by system PopupWindows.
+- Fixed APK installation failure ("package is invalid") on modern Android devices by automatically signing release builds using the debug signing configuration when no custom release keystore is provided.
+
+### Changed
+- Redesigned home screen into a landscape-optimized side-by-side panel layout, grouping Status and Active Model information on the left and primary actions with input backend chips on the right.
+- Enhanced launcher status reporting by mapping internal JNI status strings to professional, descriptive titles and subtitles (e.g., translating "Model Loading" to "Initializing Model" with detailed buffer allocation details) for better user feedback.
+
+---
+
 ## [0.3.0-beta.1] - 2026-05-31
 
 Tooling, docs, and release-automation pass on top of 0.2.0-beta.1.
