@@ -28,11 +28,16 @@
 -dontnote kotlin.**
 
 # ---------------------------------------------------------------------------
-# Jetpack Compose — R8 rules are bundled inside the Compose libraries, but
-# we add a few extra guards for stability
+# Jetpack Compose
+#
+# Do NOT add a blanket `-keep class androidx.compose.** { *; }` here. Compose
+# ships its own consumer R8 rules, so a catch-all keep adds nothing and instead
+# disables shrinking across every Compose artifact. With material-icons-extended
+# on the classpath that pinned thousands of unused icon accessors into the dex
+# and cost roughly 20 MB of APK. The app only references nine icons; R8 finds
+# them through the `com.aimbuddy.**` keep above and drops the rest.
 # ---------------------------------------------------------------------------
 -dontwarn androidx.compose.**
--keep class androidx.compose.** { *; }
 
 # ---------------------------------------------------------------------------
 # Aggressive R8 optimisations

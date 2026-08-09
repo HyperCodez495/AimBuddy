@@ -18,6 +18,11 @@ captures/
 # Local machine settings
 local.properties
 
+# Release signing material. Never commit the upload key or its passwords.
+keystore.properties
+*.jks
+*.keystore
+
 # Build outputs and packaged binaries
 *.apk
 *.aab

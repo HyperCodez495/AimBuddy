@@ -10,6 +10,28 @@ Pre-release work staged for the next tag.
 
 ---
 
+## [0.3.0-beta.3] - 2026-08-09
+
+Release signing fix, correct in-app version reporting, and a 61% smaller APK.
+
+### Fixed
+- Installing a release APK failed with "App not installed as package conflicts with an existing package". The release build type was signed with `signingConfigs.debug`, whose keystore is per-machine and is regenerated from scratch on a clean CI runner, so every build carried a different signing certificate. Android keys an installed app on (`applicationId`, certificate), so no two AimBuddy APKs could be installed over one another. Release builds now use a dedicated, stable keystore supplied through `keystore.properties` or the `AIMBUDDY_KEYSTORE_*` environment variables.
+- The ImGui window title and the Info tab reported `v0.0.0-dev` in every build. Gradle passed `AIMBUDDY_VERSION` to CMake as a cache variable, which the compiler never sees, and `CMakeLists.txt` never promoted it to a preprocessor define, so `utils/i18n.h` always fell through to its default. CMake now defines it for the compiler and warns if Gradle fails to supply it.
+
+### Performance
+- Release APK shrank from 32.59 MB to 12.66 MB. `proguard-rules.pro` carried a blanket `-keep class androidx.compose.** { *; }`, which disabled R8 shrinking across every Compose artifact and pinned the whole of `material-icons-extended` into the dex. The app references nine icons; dex dropped from 21.64 MB to 2.07 MB with all nine retained.
+- Dropped v1 (JAR) signing. It is only consulted below API 24 and `minSdk` is 30, so its per-entry digests in `MANIFEST.MF` and `CERT.SF` were roughly 93 KB of dead weight. v2 and v3 remain enabled.
+
+### Changed
+- The release workflow now requires the signing secrets and fails instead of publishing an unsigned or debug-signed APK, verifies the APK signature after building, and prints the signer's SHA-256 fingerprint to the job summary so certificate drift is caught before release.
+- Release assets are named `AimBuddy-v<version>.apk`; the misleading `-signed`/`-unsigned` suffix is gone.
+- Local release builds without a configured keystore still fall back to the debug key for convenience, but now warn that the APK must not be distributed; the same fallback is a hard error when `CI` is set.
+
+### Upgrade note
+- Because earlier APKs were signed with throwaway keys, this release cannot be installed over an existing AimBuddy build. Uninstall the old version first (`adb uninstall com.aimbuddy`, or long-press the app icon → Uninstall). Subsequent releases will upgrade in place.
+
+---
+
 ## [0.3.0-beta.2] - 2026-06-04
 
 UX overhaul and critical APK installation fix.

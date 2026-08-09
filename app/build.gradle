@@ -10,6 +10,71 @@ plugins {
 def aimbuddyVersionName = providers.gradleProperty('aimbuddy.versionName').getOrElse('0.0.0-dev')
 def aimbuddyVersionCode = providers.gradleProperty('aimbuddy.versionCode').getOrElse('1').toInteger()
 
+// ---------------------------------------------------------------------------
+// Release signing.
+//
+// Android identifies an installed app by (applicationId, signing certificate).
+// If two APKs share applicationId "com.aimbuddy" but were signed with different
+// certificates, the installer refuses the second one with:
+//
+//     "App not installed as package conflicts with an existing package"
+//
+// The release build previously used `signingConfigs.debug`, whose keystore is
+// per-machine and is auto-generated from scratch on a fresh CI runner. Every
+// build therefore produced a different certificate, so no released APK could
+// ever be installed over another. The release key must instead be a single
+// fixed keystore.
+//
+// Resolution order:
+//   1. keystore.properties in the repo root (local releases; git-ignored)
+//   2. AIMBUDDY_KEYSTORE_* environment variables (CI)
+//   3. neither -> local builds fall back to the debug key with a loud warning;
+//      CI builds fail hard so an unupgradable APK can never be published.
+// ---------------------------------------------------------------------------
+def releaseKeystore = [:]
+def keystorePropsFile = rootProject.file('keystore.properties')
+if (keystorePropsFile.exists()) {
+    def props = new Properties()
+    // Decode as UTF-8 and drop a leading BOM. Properties.load(InputStream) assumes
+    // ISO-8859-1, so a BOM-prefixed file (which both Notepad and PowerShell's
+    // `Set-Content -Encoding utf8` produce) would parse the first key as
+    // "\uFEFFstoreFile" and silently fall back to debug signing.
+    def text = keystorePropsFile.getText('UTF-8')
+    if (text.startsWith('\uFEFF')) {
+        text = text.substring(1)
+    }
+    props.load(new StringReader(text))
+
+    def missing = ['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].findAll {
+        !props.getProperty(it)?.trim()
+    }
+    if (missing) {
+        throw new GradleException("keystore.properties is missing required key(s): ${missing.join(', ')}")
+    }
+    releaseKeystore = [
+        source       : 'keystore.properties',
+        storeFile    : props.getProperty('storeFile').trim(),
+        storePassword: props.getProperty('storePassword').trim(),
+        keyAlias     : props.getProperty('keyAlias').trim(),
+        keyPassword  : props.getProperty('keyPassword').trim(),
+    ]
+} else if (System.getenv('AIMBUDDY_KEYSTORE_FILE')) {
+    releaseKeystore = [
+        source       : 'AIMBUDDY_KEYSTORE_* environment',
+        storeFile    : System.getenv('AIMBUDDY_KEYSTORE_FILE'),
+        storePassword: System.getenv('AIMBUDDY_KEYSTORE_PASSWORD'),
+        keyAlias     : System.getenv('AIMBUDDY_KEY_ALIAS'),
+        keyPassword  : System.getenv('AIMBUDDY_KEY_PASSWORD'),
+    ]
+}
+// rootProject.file() leaves absolute paths untouched and resolves relative ones
+// against the repo root, so both `storeFile=upload.jks` and an absolute CI path work.
+def releaseKeystoreFile = releaseKeystore.storeFile ? rootProject.file(releaseKeystore.storeFile) : null
+def hasReleaseKeystore = releaseKeystoreFile != null && releaseKeystoreFile.exists()
+if (releaseKeystoreFile != null && !hasReleaseKeystore) {
+    logger.warn("AimBuddy: keystore configured via ${releaseKeystore.source} but ${releaseKeystoreFile} does not exist.")
+}
+
 android {
     namespace = 'com.aimbuddy'
     compileSdk = 35
@@ -29,20 +94,41 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags "-std=c++17"
-                // AIMBUDDY_VERSION is consumed by utils/i18n.h and friends so
-                // the in-app menu shows the same string as the APK metadata.
+                // AIMBUDDY_VERSION reaches CMake as a cache variable; CMakeLists.txt
+                // promotes it to a compile definition for utils/i18n.h. Pass it bare:
+                // CMake adds the string quotes, and embedding them here would
+                // double-quote the define and break the build.
                 arguments "-DANDROID_STL=c++_static",
                           "-DANDROID_ARM_NEON=TRUE",
-                          "-DAIMBUDDY_VERSION=\"${aimbuddyVersionName}\""
+                          "-DAIMBUDDY_VERSION=${aimbuddyVersionName}"
             }
         }
 
         buildConfigField "String", "AIMBUDDY_VERSION", "\"${aimbuddyVersionName}\""
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            release {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseKeystore.storePassword
+                keyAlias = releaseKeystore.keyAlias
+                keyPassword = releaseKeystore.keyPassword
+                // v1 (JAR signing) only matters below API 24 and costs ~93 KB of
+                // per-entry digests in MANIFEST.MF/CERT.SF. minSdk is 30, so every
+                // device that can install this verifies via v2/v3.
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig signingConfigs.debug
+            // Falls back to the debug key only for local throwaway builds; the
+            // taskGraph check below turns that fallback into a hard error on CI.
+            signingConfig hasReleaseKeystore ? signingConfigs.release : signingConfigs.debug
             minifyEnabled = true
             shrinkResources = true
             debuggable = false
@@ -108,6 +194,31 @@ android {
 
     buildToolsVersion = '36.0.0'
     ndkVersion = '29.0.13113456 rc1'
+}
+
+// Guard: never let a release APK leave CI signed with an ephemeral debug key.
+// A debug-signed release is fine locally (fast install-and-test loop) but if it
+// is published, users can never upgrade to or from it, because the next build's
+// certificate will differ and the installer reports a package conflict.
+gradle.taskGraph.whenReady { graph ->
+    def buildsRelease = graph.allTasks.any {
+        it.path.startsWith("${project.path}:") && it.name ==~ /(?i)(assemble|bundle|package|install)Release/
+    }
+    if (!buildsRelease) {
+        return
+    }
+    if (hasReleaseKeystore) {
+        logger.lifecycle("AimBuddy: signing release with ${releaseKeystoreFile} (from ${releaseKeystore.source})")
+        return
+    }
+    def message = "No release keystore configured. Set AIMBUDDY_KEYSTORE_FILE / " +
+                  "AIMBUDDY_KEYSTORE_PASSWORD / AIMBUDDY_KEY_ALIAS / AIMBUDDY_KEY_PASSWORD, " +
+                  "or create keystore.properties in the repo root. See README > Release Signing."
+    if (System.getenv('CI')) {
+        throw new GradleException("Refusing to build a publishable release APK: ${message}")
+    }
+    logger.warn("AimBuddy WARNING: release APK will be signed with the local debug key. ${message}")
+    logger.warn("AimBuddy WARNING: do NOT distribute this APK. It cannot be upgraded by a properly signed build.")
 }
 
 dependencies {

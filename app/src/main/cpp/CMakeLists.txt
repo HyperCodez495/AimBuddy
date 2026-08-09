@@ -10,6 +10,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # =============================================================================
+# App version. Gradle passes -DAIMBUDDY_VERSION=<aimbuddy.versionName> from the
+# root gradle.properties. It arrives here as a CMake cache variable, which the
+# compiler never sees, so it has to be promoted to a preprocessor define.
+# Without this, utils/i18n.h falls back to its "0.0.0-dev" default and the ImGui
+# title and Info tab report the wrong version in every release build.
+# =============================================================================
+if(NOT DEFINED AIMBUDDY_VERSION OR AIMBUDDY_VERSION STREQUAL "")
+    set(AIMBUDDY_VERSION "0.0.0-dev")
+    message(WARNING "AIMBUDDY_VERSION not supplied by Gradle; falling back to ${AIMBUDDY_VERSION}")
+endif()
+message(STATUS "AimBuddy version: ${AIMBUDDY_VERSION}")
+add_compile_definitions(AIMBUDDY_VERSION="${AIMBUDDY_VERSION}")
+
+# =============================================================================
 # Compiler flags — generic ARM64 baseline, works on ALL arm64-v8a devices.
 # The CPU-specific extensions (dotprod, fp16, i8mm) are probed at runtime by
 # NCNN's own CPU-capability detection, so we do NOT compile for a specific

@@ -151,40 +151,43 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      - name: Decode signing keystore (optional)
+      # The release keystore is mandatory. Android keys an installed app on
+      # (applicationId, signing certificate), so every AimBuddy release has to be
+      # signed with the SAME certificate, otherwise users get "package conflicts
+      # with an existing package" and cannot upgrade. Falling back to an unsigned
+      # or debug-signed APK here would silently publish an un-upgradable build.
+      - name: Decode signing keystore (required)
         id: keystore
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ -z "${KEYSTORE_BASE64:-}" ]; then
-            echo "No KEYSTORE_BASE64 secret configured; APK will be unsigned."
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          set -euo pipefail
+          MISSING=""
+          [ -n "${KEYSTORE_BASE64:-}" ]  || MISSING="$MISSING KEYSTORE_BASE64"
+          [ -n "${KEYSTORE_PASSWORD:-}" ] || MISSING="$MISSING KEYSTORE_PASSWORD"
+          [ -n "${KEY_ALIAS:-}" ]         || MISSING="$MISSING KEY_ALIAS"
+          [ -n "${KEY_PASSWORD:-}" ]      || MISSING="$MISSING KEY_PASSWORD"
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: missing repository secret(s):$MISSING"
+            echo "A release cannot be published without the stable upload keystore."
+            echo "See README > Release Signing for how to generate and register it."
+            exit 1
           fi
           mkdir -p "$RUNNER_TEMP/keystore"
           KEYSTORE_PATH="$RUNNER_TEMP/keystore/upload.jks"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
           echo "keystore_path=$KEYSTORE_PATH" >> "$GITHUB_OUTPUT"
-          echo "signed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Build release APK (signed)
-        if: steps.keystore.outputs.signed == 'true'
+      - name: Build release APK
         env:
-          KEYSTORE_PATH: ${{ steps.keystore.outputs.keystore_path }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          chmod +x ./gradlew
-          ./gradlew --no-daemon assembleRelease \
-            -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
-            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
-
-      - name: Build release APK (unsigned)
-        if: steps.keystore.outputs.signed != 'true'
+          AIMBUDDY_KEYSTORE_FILE: ${{ steps.keystore.outputs.keystore_path }}
+          AIMBUDDY_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          AIMBUDDY_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          AIMBUDDY_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon assembleRelease
@@ -201,16 +204,36 @@ jobs:
             ls -R app/build/outputs || true
             exit 1
           fi
-          SUFFIX="signed"
-          if [ "${{ steps.keystore.outputs.signed }}" != "true" ]; then
-            SUFFIX="unsigned"
-          fi
-          OUT_NAME="AimBuddy-v${VERSION}-${SUFFIX}.apk"
+          OUT_NAME="AimBuddy-v${VERSION}.apk"
           OUT_PATH="${RUNNER_TEMP}/${OUT_NAME}"
           cp "${APK}" "${OUT_PATH}"
           echo "apk_path=${OUT_PATH}" >> "$GITHUB_OUTPUT"
           echo "apk_name=${OUT_NAME}" >> "$GITHUB_OUTPUT"
           ls -lh "${OUT_PATH}"
+
+      # Prints the signer certificate digest. Every release must show the SAME
+      # SHA-256 as the previous one; a changed digest means users will hit
+      # "package conflicts with an existing package" on upgrade.
+      - name: Verify signature and print certificate fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          # `|| true` so a missing build-tools dir reports the message below
+          # instead of dying on set -e / pipefail inside the substitution.
+          APKSIGNER=$(find "$SDK/build-tools" -name apksigner 2>/dev/null | sort -r | head -n1 || true)
+          if [ -z "$APKSIGNER" ]; then
+            echo "apksigner not found under $SDK/build-tools"
+            exit 1
+          fi
+          "$APKSIGNER" verify --print-certs --verbose "${{ steps.locate.outputs.apk_path }}"
+          {
+            echo "### Release APK signer"
+            echo '```'
+            "$APKSIGNER" verify --print-certs "${{ steps.locate.outputs.apk_path }}" | grep -i 'SHA-256 digest\|Signer #1 certificate DN'
+            echo '```'
+            echo "This SHA-256 must match every prior release, or users cannot upgrade in place."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
